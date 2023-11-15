@@ -5,6 +5,8 @@ import os
 import sys
 from typing import List, Optional, Tuple
 
+import omegaconf
+
 from sample_factory.algo.utils.env_info import EnvInfo
 from sample_factory.algo.utils.rl_utils import total_num_agents
 from sample_factory.cfg.cfg import (
@@ -203,6 +205,9 @@ def verify_cfg(cfg: Config, env_info: EnvInfo) -> bool:
 
 def cfg_dict(cfg: Config) -> AttrDict:
     if isinstance(cfg, dict):
+        return AttrDict(cfg)
+    elif isinstance(cfg, omegaconf.dictconfig.DictConfig):
+        cfg = omegaconf.OmegaConf.to_container(cfg)  # to dict
         return AttrDict(cfg)
     else:
         return AttrDict(vars(cfg))
