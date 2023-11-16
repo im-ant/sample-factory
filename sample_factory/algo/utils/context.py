@@ -1,5 +1,6 @@
-from typing import Dict
+from typing import Any, Dict
 
+from sample_factory.algo.learning.learner_factory import LearnerFactory
 from sample_factory.model.model_factory import ModelFactory
 from sample_factory.utils.typing import CreateEnvFunc
 
@@ -8,6 +9,7 @@ class SampleFactoryContext:
     def __init__(self):
         self.env_registry = dict()
         self.model_factory = ModelFactory()
+        self.learner_factory = LearnerFactory()
 
 
 GLOBAL_CONTEXT = None
@@ -44,3 +46,10 @@ def global_model_factory() -> ModelFactory:
     :rtype: ModelFactory
     """
     return sf_global_context().model_factory
+
+
+def global_learner_factory() -> Any:  # NOTE: outputs learner factory
+    """
+    :return: global learner factory
+    """
+    return sf_global_context().learner_factory
