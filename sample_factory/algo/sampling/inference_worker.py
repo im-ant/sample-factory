@@ -220,13 +220,16 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
             traj_tensors = self.traj_tensors[device]  # TODO: multiple sampling devices?
             observations = traj_tensors["obs"][indices]
             rnn_states = traj_tensors["rnn_states"][indices]
+            actions = traj_tensors["actions"][indices]
 
         with timing.add_time("stack"):
             for key, x in observations.items():
                 observations[key] = ensure_torch_tensor(x)
-            rnn_states = ensure_torch_tensor(rnn_states)
+            for key, x in rnn_states.items():
+                rnn_states[key] = ensure_torch_tensor(x)
+            actions = ensure_torch_tensor(actions)
 
-        return observations, rnn_states
+        return observations, rnn_states, actions
 
     @staticmethod
     def _unsqueeze_0dim_tensors(d: TensorDict):
@@ -279,16 +282,21 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
 
         with self.timing.add_time("to_cpu"):
             for key, output_value in policy_outputs.items():
-                policy_outputs[key] = output_value.to(device)
-
+                if isinstance(output_value, TensorDict):
+                    # NOTE: this is non-recursive, assume at most 2-level dict
+                    for k2, v2 in output_value.items():
+                        policy_outputs[key][k2] = v2.to(device)
+                else:
+                    policy_outputs[key] = output_value.to(device)
+        
         # concat all tensors into a single tensor for performance
         output_tensors = []
         for name in self.buffer_mgr.output_names:
-            output_value = policy_outputs[name].float()
+            output_value = policy_outputs['concat_outputs'][name].float()
             while output_value.dim() <= 1:
                 output_value.unsqueeze_(-1)
             output_tensors.append(output_value)
-
+        
         output_tensors = torch.cat(output_tensors, dim=1)
 
         signals_to_send: AdvanceRolloutSignals = dict()
@@ -305,7 +313,15 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
                 signals_to_send[actor_idx] = [payload]
 
         output_indices = tuple(np.array(output_indices).T)
-        self.policy_output_tensors[device][output_indices] = output_tensors.numpy()
+
+        # NOTE: (Ant) I think this is where we write to the shared policy output tensors
+        self.policy_output_tensors[device]["concat_outputs"][output_indices] \
+            = output_tensors.numpy()
+        
+        # NOTE: (Ant) set the RNN states here
+        for name in self.buffer_mgr.rnn_spaces:
+            self.policy_output_tensors[device]["new_rnn_states"][output_indices][name] \
+                = policy_outputs['new_rnn_states'][name].numpy()
 
         # this should be a no-op unless we have a non-batched env with observations on gpu
         synchronize(self.cfg, device)
@@ -314,8 +330,8 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
 
     def _handle_policy_steps(self, timing):
         with inference_context(self.cfg.serial_mode):
-            obs, rnn_states = self._batch_func(timing)
-            num_samples = rnn_states.shape[0]
+            obs, rnn_states, actions = self._batch_func(timing)
+            num_samples = rnn_states[next(iter(rnn_states))].shape[0]
             self.total_num_samples += num_samples
 
             with timing.add_time("obs_to_device_normalize"):
@@ -324,11 +340,15 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
                     actor_critic.eval()  # need to call this because we can be in serial mode
 
                 normalized_obs = prepare_and_normalize_obs(actor_critic, obs)
-                rnn_states = ensure_torch_tensor(rnn_states).to(self.device).float()
+                for rnn_k in rnn_states:
+                    rnn_states[rnn_k] = ensure_torch_tensor(rnn_states[rnn_k])\
+                        .to(self.device).float()
+                actions = ensure_torch_tensor(actions).to(self.device).float()
 
             with timing.add_time("forward"):
-                policy_outputs = actor_critic(normalized_obs, rnn_states)
-                policy_outputs["policy_version"] = torch.empty([num_samples]).fill_(self.param_client.policy_version)
+                policy_outputs = actor_critic(normalized_obs, rnn_states, actions)
+                policy_outputs["concat_outputs"]["policy_version"] = \
+                    torch.empty([num_samples]).fill_(self.param_client.policy_version)
 
             with timing.add_time("prepare_outputs"):
                 signals_to_send = self._prepare_policy_outputs_func(num_samples, policy_outputs, self.requests)
@@ -336,7 +356,6 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
             with timing.add_time("send_messages"):
                 for actor_idx, data in signals_to_send.items():
                     self.emit_many(advance_rollouts_signal(actor_idx), data)
-
             self.requests = []
 
     def _get_inference_requests_serial(self):

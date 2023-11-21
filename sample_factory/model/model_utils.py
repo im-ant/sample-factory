@@ -1,3 +1,4 @@
+from collections import namedtuple
 from typing import List, Optional
 
 import torch
@@ -9,6 +10,7 @@ from sample_factory.utils.typing import Config
 
 
 def get_rnn_size(cfg):
+    """Original implementation to get RNN latent dimension"""
     if cfg.use_rnn:
         size = cfg.rnn_size * cfg.rnn_num_layers
     else:
@@ -22,6 +24,33 @@ def get_rnn_size(cfg):
         size *= 2
 
     return size
+
+
+# NOTE: names "RNNSpace" and namedtuple needs to be the same for pickle to work
+RNNSpace = namedtuple("RNNSpace", ["dtype", "shape"]) 
+def get_rnn_info(cfg):
+    """Get RNN intermediate states as a dict of items"""
+    spaces = dict()
+    if cfg.use_rnn:
+        # TODO ant 2023-11-19: is this the best way to initialize from cfg?
+        deter_shape = (cfg.rnn_determinstic_size,)
+        stoch_shape = (cfg.rnn_stochastic_size, cfg.rnn_discrete_size)
+        
+        spaces["deter"] = RNNSpace(dtype="float32", shape=deter_shape)
+        spaces["stoch"] = RNNSpace(dtype="float32", shape=stoch_shape)
+        spaces["logit"] = RNNSpace(dtype="float32", shape=stoch_shape)
+    else:
+        spaces["deter"] = RNNSpace(dtype="float32", shape=(1,))
+
+    if cfg.rnn_type == "lstm":
+        raise NotImplementedError
+
+    if not cfg.actor_critic_share_weights:
+        # actor and critic need separate states
+        size *= 2
+        raise NotImplementedError
+
+    return spaces
 
 
 def nonlinearity(cfg: Config, inplace: bool = False) -> nn.Module:

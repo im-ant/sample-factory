@@ -16,7 +16,7 @@ from sample_factory.algo.utils.rl_utils import trajectories_per_training_iterati
 from sample_factory.algo.utils.tensor_dict import TensorDict
 from sample_factory.algo.utils.torch_utils import to_torch_dtype
 from sample_factory.cfg.configurable import Configurable
-from sample_factory.model.model_utils import get_rnn_size
+from sample_factory.model.model_utils import get_rnn_size, get_rnn_info
 from sample_factory.utils.attr_dict import AttrDict
 from sample_factory.utils.gpu_utils import gpus_for_process
 from sample_factory.utils.typing import Device, MpQueue, PolicyID
@@ -76,7 +76,10 @@ def policy_output_shapes(num_actions, num_action_distribution_parameters) -> Lis
     return policy_outputs
 
 
-def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, device, share) -> TensorDict:
+def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, device, share) -> TensorDict:
+    """
+    Allocate memory spaces to store trajectory tensors
+    """
     obs_space = env_info.obs_space
 
     tensors = TensorDict()
@@ -89,7 +92,12 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, dev
     # we need to allocate an extra rollout step here to calculate the value estimates for the last step
     for space_name, space in obs_space.spaces.items():
         tensors["obs"][space_name] = init_tensor([num_traj, rollout + 1], space.dtype, space.shape, device, share)
-    tensors["rnn_states"] = init_tensor([num_traj, rollout + 1], torch.float32, [rnn_size], device, share)
+    
+    tensors["rnn_states"] = TensorDict()
+    for space_name, rnn_space in rnn_spaces.items():
+        tensors["rnn_states"][space_name] = init_tensor(
+            [num_traj, rollout + 1], rnn_space.dtype, rnn_space.shape, 
+            device, share)
 
     num_actions, num_action_distribution_parameters = action_info(env_info)
     policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters)
@@ -117,7 +125,7 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, dev
     return tensors
 
 
-def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_size, device, share):
+def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_spaces, device, share):
     num_agents = env_info.num_agents
     envs_per_split = cfg.num_envs_per_worker // cfg.worker_num_splits
 
@@ -129,23 +137,35 @@ def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_size, device, share)
 
     num_actions, num_action_distribution_parameters = action_info(env_info)
     policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters)
-    policy_outputs += [("new_rnn_states", [rnn_size])]  # different name so we don't override current step rnn_state
+    # policy_outputs += [("new_rnn_states", [rnn_spaces['deterministic'].shape[0]])]  # different name so we don't override current step rnn_state
 
     output_names, output_shapes = list(zip(*policy_outputs))
     output_sizes = [shape[0] if shape else 1 for shape in output_shapes]
 
     if cfg.batched_sampling:
+        raise NotImplementedError  # didn't implement the policy output dims with batched sampling 
         policy_output_tensors = TensorDict()
         for name, shape in policy_outputs:
             policy_output_tensors[name] = init_tensor(policy_outputs_shape, torch.float32, shape, device, share)
     else:
+        policy_output_tensors = TensorDict()
+
         # copying small policy outputs (e.g. individual value predictions & action logits) to shared memory is a
         # bottleneck on the policy worker. For optimization purposes we create additional tensors to hold
         # just concatenated policy outputs. Rollout workers parse the data and add it to the trajectory buffers
         # in a proper format
         outputs_combined_size = sum(output_sizes)
-        policy_output_tensors = init_tensor(policy_outputs_shape, torch.float32, [outputs_combined_size], device, share)
-
+        policy_output_tensors["concat_outputs"] = init_tensor(
+            policy_outputs_shape, torch.float32, [outputs_combined_size], 
+            device, share)
+        
+        # Add RNN states separately
+        policy_output_tensors["new_rnn_states"] = TensorDict()  # different name so we don't override current step rnn_state
+        for space_name, rnn_space in rnn_spaces.items():
+            policy_output_tensors["new_rnn_states"][space_name] = init_tensor(
+                policy_outputs_shape, rnn_space.dtype, rnn_space.shape, 
+                device, share)
+            
     return policy_output_tensors, output_names, output_sizes
 
 
@@ -166,7 +186,7 @@ class BufferMgr(Configurable):
             buffers_for_device = self.buffers_per_device.get(sampling_device, 0) + num_buffers
             self.buffers_per_device[sampling_device] = buffers_for_device
 
-        rnn_size = get_rnn_size(cfg)  # in case we have RNNs
+        self.rnn_spaces = get_rnn_info(cfg)  # in case we have RNNs
 
         self.trajectories_per_training_iteration = trajectories_per_training_iteration(cfg)
 
@@ -216,12 +236,12 @@ class BufferMgr(Configurable):
                 env_info,
                 num_buffers,
                 cfg.rollout,
-                rnn_size,
+                self.rnn_spaces,
                 device,
                 share,
             )
             self.policy_output_tensors_torch[device], output_names, output_sizes = alloc_policy_output_tensors(
-                cfg, env_info, rnn_size, device, share
+                cfg, env_info, self.rnn_spaces, device, share
             )
             self.output_names, self.output_sizes = output_names, output_sizes
 

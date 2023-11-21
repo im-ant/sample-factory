@@ -130,11 +130,12 @@ class ActorState:
         :param rollout_step: number of steps since we started the current rollout. When this reaches cfg.rollout
         we finalize the trajectory buffer and send it to the learner.
         """
-
         self.curr_traj_buffer[rollout_step] = data
 
     def reset_rnn_state(self):
-        self.last_rnn_state[:] = 0.0
+        for rnn_k in self.last_rnn_state:
+            # NOTE: should auto-broadcast to all entries and maintain dtype
+            self.last_rnn_state[rnn_k][:] = 0  
 
     def curr_actions(self) -> np.ndarray | List | Any:
         """
@@ -441,7 +442,12 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
             for agent_i, obs in enumerate(observations):
                 actor_state = self.actor_states[env_i][agent_i]
                 actor_state.last_obs = obs
-                actor_state.last_rnn_state = clone_tensor(self.traj_tensors["rnn_states"][0, 0])
+
+                # initialize actor_state's rnn state, copy over traj_tensor
+                actor_state.last_rnn_state = TensorDict()
+                for rnn_k in self.traj_tensors["rnn_states"]:
+                    actor_state.last_rnn_state[rnn_k] = clone_tensor(
+                        self.traj_tensors["rnn_states"][rnn_k][0, 0])
                 actor_state.reset_rnn_state()
 
         self.env_step_ready = True
@@ -476,7 +482,7 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
 
                     with timing.add_time("split_output_tensors"):
                         policy_outputs = np.split(
-                            actor_state.policy_output_tensors,
+                            actor_state.policy_output_tensors["concat_outputs"],
                             indices_or_sections=actor_state.policy_output_indices,
                             axis=0,
                         )
@@ -485,11 +491,15 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
                         policy_outputs_dict[name] = policy_outputs[tensor_idx]
 
                     # save parsed trajectory outputs directly into the trajectory buffer
+                    # NOTE (ant): NOT setting the rnn_states in set_trajectory_data here
                     actor_state.set_trajectory_data(policy_outputs_dict, self.rollout_step)
                     actor_state.last_actions = policy_outputs_dict["actions"].squeeze()
 
                     # this is an rnn state for the next iteration in the rollout
-                    actor_state.last_rnn_state = policy_outputs_dict["new_rnn_states"]
+                    # TODO (ant): maybe there is a bug here, why was the OG code getting this from policy_outputs_dict?
+                    # actor_state.last_rnn_state = policy_outputs_dict["new_rnn_states"]
+                    # actor_state.last_value = policy_outputs_dict["values"].item()
+                    actor_state.last_rnn_state = actor_state.policy_output_tensors['new_rnn_states']
                     actor_state.last_value = policy_outputs_dict["values"].item()
 
                     actor_state.ready = True
