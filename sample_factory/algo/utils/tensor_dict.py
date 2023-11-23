@@ -91,7 +91,7 @@ def shallow_recursive_copy(d: TensorDict) -> TensorDict:
 def tensor_dict_to_numpy(d: TensorDict) -> TensorDict:
     numpy_dict = copy_dict_structure(d)
     for d1, d2, key, curr_t, value2 in iter_dicts_recursively(d, numpy_dict):
-        assert isinstance(curr_t, torch.Tensor)
+        assert isinstance(curr_t, torch.Tensor), f"object is: {curr_t}"
         assert value2 is None
         d2[key] = curr_t.numpy()
         assert isinstance(d2[key], np.ndarray)
@@ -123,6 +123,38 @@ def cat_tensordicts(lst: List[TensorDict]) -> TensorDict:
             raise ValueError(f"Type {type(v[0])} not supported in cat_tensordicts")
 
     return TensorDict(res)
+
+
+def to_numpy_dict(td: TensorDict) -> Dict[str, np.ndarray]:
+    """
+    Converts a tensordict to a (regular) dict of numpy arrays
+    """
+    # TensorDict returns True for isinstance(td, dict)
+    assert isinstance(td, dict), f"input has type {type(td)}"
+    output = {}
+    for k in td:
+        if isinstance(td[k], dict):
+            output[k] = to_numpy_dict(td[k])
+        else:
+            if isinstance(td[k], torch.Tensor):
+                output[k] = td[k].cpu().numpy()
+            else:
+                # NOTE: assuming this is a numpy array
+                output[k] = td[k].copy()
+
+    return output
+
+
+def flatten_dict(d, parent_key='', sep='.'):
+    """Flattens a multi-level dict to be a single level"""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 
 def find_invalid_data(

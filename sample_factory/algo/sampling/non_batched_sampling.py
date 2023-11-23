@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime
 import random
+from pathlib import Path
 from queue import Empty
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,7 +15,7 @@ from sample_factory.algo.utils.env_info import EnvInfo, check_env_info
 from sample_factory.algo.utils.make_env import make_env_func_non_batched
 from sample_factory.algo.utils.misc import EPISODIC, POLICY_ID_KEY
 from sample_factory.algo.utils.shared_buffers import BufferMgr
-from sample_factory.algo.utils.tensor_dict import TensorDict, to_numpy
+from sample_factory.algo.utils.tensor_dict import TensorDict, to_numpy, to_numpy_dict
 from sample_factory.algo.utils.tensor_utils import clone_tensor, ensure_numpy_array
 from sample_factory.envs.env_utils import find_training_info_interface, set_reward_shaping, set_training_info
 from sample_factory.utils.attr_dict import AttrDict
@@ -369,11 +371,23 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
 
         self.policy_mgr = AgentPolicyMapping(self.cfg, self.env_info)
 
+        # (AC) For FileBatcher, we create the dataset directory here
+        self.dataset_dir = None
+
     def init(self, timing: Timing):
         """
         Actually instantiate the env instances.
         Also creates ActorState objects that hold the state of individual actors in (potentially) multi-agent envs.
         """
+        # (AC) For FileBatcher, we create the dataset directory here
+        if self.cfg.on_file_dataset_mode:
+            self.dataset_dir = Path.cwd() / Path(self.cfg.on_file_dataset_dir)
+
+            if not self.dataset_dir.exists():
+                self.dataset_dir.mkdir(parents=True, exist_ok=True)
+                log.info('Creating dataset directory: {}'.format(self.dataset_dir))
+
+        # 
         for env_i in range(self.num_envs):
             vector_idx = self.split_idx * self.num_envs + env_i
 
@@ -707,6 +721,42 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
         here.
         """
         pass
+    
+    def maybe_save_rollouts_to_file(self, complete_rollouts) -> bool:
+        """
+        Save each of the rollouts to file if we have them to file
+        """
+        if not self.cfg.on_file_dataset_mode:
+            return False
+        
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                actor_state = self.actor_states[env_i][agent_i]
+
+                # Construct a unique ID
+                dtnow = datetime.datetime.now()
+
+                cur_nt = actor_state.num_trajectories
+                cur_ti = dtnow.strftime("%y%m%d-%H%M%S")
+                cur_gi = actor_state.global_env_idx
+                cur_wi = actor_state.worker_idx
+                cur_si = actor_state.split_idx
+                cur_ai = actor_state.agent_idx
+                cur_ei = actor_state.env_idx
+                
+                unique_id = f"{cur_nt}_d-{cur_ti}_{cur_gi}_{cur_wi}_{cur_si}_{cur_ai}_{cur_ei}"
+
+                # Path
+                filename = f"{unique_id}.npz"
+                file_path = self.dataset_dir / Path(filename)
+
+                # Save as a dictionary of numpy arrays
+                np_traj_dict = to_numpy_dict(actor_state.curr_traj_buffer)  # deepcopies
+                
+                with open(file_path, 'wb') as f:
+                    np.savez_compressed(f, **np_traj_dict)
+                
+        return True
 
     def close(self):
         for e in self.envs:

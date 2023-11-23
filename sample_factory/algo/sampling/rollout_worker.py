@@ -242,7 +242,13 @@ class RolloutWorker(HeartbeatStoppableEventLoopObject, Configurable):
 
             with self.timing.add_time("complete_rollouts"):
                 if complete_rollouts:
+                    # (Ant) Optional function to save the rollout as numpy files
+                    runner.maybe_save_rollouts_to_file(complete_rollouts)
+                    
+                    # NOTE (Ant): the complete_rollouts is a dict pointing to the rollout memory location
                     self._enqueue_complete_rollouts(complete_rollouts)
+
+                    
                     if not self.experience_decorrelated and not self.cfg.benchmark:
                         # we just finished our first complete rollouts, perfect time to wait for experience derorrelation
                         # this guarantees that there won't be any obsolete trajectories when we awaken
