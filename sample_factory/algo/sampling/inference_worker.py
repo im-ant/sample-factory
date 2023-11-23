@@ -221,6 +221,7 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
             observations = traj_tensors["obs"][indices]
             rnn_states = traj_tensors["rnn_states"][indices]
             actions = traj_tensors["actions"][indices]
+            dones = traj_tensors["dones"][indices]
 
         with timing.add_time("stack"):
             for key, x in observations.items():
@@ -228,8 +229,9 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
             for key, x in rnn_states.items():
                 rnn_states[key] = ensure_torch_tensor(x)
             actions = ensure_torch_tensor(actions)
+            dones = ensure_torch_tensor(dones).unsqueeze(-1)  # (batch, 1)
 
-        return observations, rnn_states, actions
+        return observations, rnn_states, actions, dones
 
     @staticmethod
     def _unsqueeze_0dim_tensors(d: TensorDict):
@@ -330,7 +332,7 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
 
     def _handle_policy_steps(self, timing):
         with inference_context(self.cfg.serial_mode):
-            obs, rnn_states, actions = self._batch_func(timing)
+            obs, rnn_states, actions, dones = self._batch_func(timing)
             num_samples = rnn_states[next(iter(rnn_states))].shape[0]
             self.total_num_samples += num_samples
 
@@ -343,10 +345,12 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
                 for rnn_k in rnn_states:
                     rnn_states[rnn_k] = ensure_torch_tensor(rnn_states[rnn_k])\
                         .to(self.device).float()
-                actions = ensure_torch_tensor(actions).to(self.device).float()
+                actions = ensure_torch_tensor(actions).to(self.device)
+                dones = ensure_torch_tensor(dones).to(self.device)
 
             with timing.add_time("forward"):
-                policy_outputs = actor_critic(normalized_obs, rnn_states, actions)
+                policy_outputs = actor_critic(normalized_obs, rnn_states, 
+                                              actions, dones)
                 policy_outputs["concat_outputs"]["policy_version"] = \
                     torch.empty([num_samples]).fill_(self.param_client.policy_version)
 
