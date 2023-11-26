@@ -380,12 +380,11 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
         Also creates ActorState objects that hold the state of individual actors in (potentially) multi-agent envs.
         """
         # (AC) For FileBatcher, we create the dataset directory here
-        if self.cfg.on_file_dataset_mode:
-            self.dataset_dir = Path.cwd() / Path(self.cfg.on_file_dataset_dir)
-
-            if not self.dataset_dir.exists():
-                self.dataset_dir.mkdir(parents=True, exist_ok=True)
-                log.info('Creating dataset directory: {}'.format(self.dataset_dir))
+        # NOTE: this is deprecated and no longer used
+        # self.dataset_dir = Path.cwd() / Path(self.cfg.on_file_dataset_dir)
+        # if not self.dataset_dir.exists():
+        #   self.dataset_dir.mkdir(parents=True, exist_ok=True)
+        #   log.info('Creating dataset directory: {}'.format(self.dataset_dir))
 
         # 
         for env_i in range(self.num_envs):
@@ -694,6 +693,7 @@ class NonBatchedVectorEnvRunner(VectorEnvRunner):
                                 self.need_trajectory_buffers -= 1
                                 i += 1
                 except Empty:
+                    # import pdb; pdb.set_trace()  # TODO only come here to debug no traj buffer
                     return False
 
         assert self.need_trajectory_buffers == 0

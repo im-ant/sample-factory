@@ -275,3 +275,231 @@ class Batcher(HeartbeatStoppableEventLoopObject):
     def on_stop(self, *args):
         self.stop.emit(self.object_id, {self.object_id: self.timing})
         super().on_stop(*args)
+
+
+# ==
+# 
+class SavingBatcher(Batcher):
+    """
+    Batcher that saves in memory all sampled trajectories to sample from
+
+    N.B.: there is a _single_ batcher per policy which handles all of the
+          learning data for that policy
+    """
+    def __init__(
+        self, evt_loop: EventLoop, policy_id: PolicyID, buffer_mgr: BufferMgr, cfg: AttrDict, env_info: EnvInfo
+    ):
+        super().__init__(evt_loop, policy_id, buffer_mgr, cfg, env_info)
+
+        # repeat of some things in super().__init__(...) for clarity
+        self.n_training_trajs = None
+        self.training_batches: List[TensorDict] = [] 
+        self.tr_device = None
+
+        self.max_batches_to_accumulate = cfg.num_batches_to_accumulate
+        self.traj_slices_to_release: List[Tuple[Device, slice]] = []
+
+        self._n_slices_merged: int = 0
+
+        # self.available_batches = list(range(self.max_batches_to_accumulate))
+        # self.traj_tensors_to_release: List[List[Tuple[Device, slice]]] = [
+        #     [] for _ in range(self.max_batches_to_accumulate)
+        # ]  # TODO: I think these two are not used?
+
+        self.training_iteration: int = 0
+        self._prev_training_iteration: int = 0
+
+        # Saving buffer items
+        self.dataset: TensorDict = None
+        self.dataset_max_size: int = None
+        self.dataset_idx: int = None
+        self.dataset_len: int = None
+    
+    def init(self):
+        self.tr_device = policy_device(self.cfg, self.policy_id)
+        rnn_spaces = get_rnn_info(self.cfg)
+        
+        self.n_training_trajs = self.cfg.batch_n_trajectories
+        for i in range(self.max_batches_to_accumulate):
+            training_batch = alloc_trajectory_tensors(
+                self.env_info,
+                self.n_training_trajs,
+                self.cfg.rollout,
+                rnn_spaces,
+                device=self.tr_device,
+                share=False,
+            )
+            self.training_batches.append(training_batch)
+
+        # TODO: add an assertion statement for this, i.e. only sample exactly
+        #       the amount required to fill this dataset, also figure out
+        #       the CPU-GPU memory transfer step (have it be on CPU and switch)
+        #       to GPU here when sending to learner
+        self.dataset_max_size = self.cfg.saving_batcher_max_size
+        rollout_length = self.cfg.rollout
+        self.dataset = alloc_trajectory_tensors(
+            self.env_info,
+            self.dataset_max_size,
+            rollout_length,
+            rnn_spaces,
+            device="cpu",
+            share=False,
+        )
+        self.dataset_idx = 0
+        self.dataset_len = 0
+
+        self.initialized.emit()
+
+    def on_new_trajectories(self, trajectory_dicts: Iterable[Dict], device: str):
+        """
+        This is called when the sampler has new trajectories; on sampler signal 
+        sampler.connect_on_new_trajectories
+        """
+        with self.timing.add_time("batching"):
+            for trajectory_dict in trajectory_dicts:
+                assert trajectory_dict["policy_id"] == self.policy_id
+                trajectory_slice = trajectory_dict["traj_buffer_idx"]
+                if not isinstance(trajectory_slice, slice):
+                    trajectory_slice = slice(trajectory_slice, trajectory_slice + 1)  # slice of len 1
+                # log.debug(f"{self.policy_id} received trajectory slice {trajectory_slice}")
+                self.slices_for_training[device].merge_slices(trajectory_slice)
+
+                self._n_slices_merged += slice_len(trajectory_slice)
+
+            self._maybe_enqueue_new_trajectory_data()
+            if self.dataset_len >= self.n_training_trajs:
+                self._maybe_enqueue_new_training_batches() 
+
+    def _maybe_enqueue_new_trajectory_data(self):
+        with torch.no_grad():
+            total_num_trajectories = 0
+            for slices in self.slices_for_training.values():
+                total_num_trajectories += slices.total_num
+
+            # extract slices of trajectories and copy them to the training batch
+            devices = list(self.slices_for_training.keys())
+            random.shuffle(devices)  # so that no sampling device is preferred
+
+            trajectories_copied = 0 
+            remaining = self.traj_per_training_iteration - trajectories_copied   #TODO: do I need all/any of these logic?
+            for device in devices:
+                traj_tensors = self.traj_tensors[device]
+                slices = self.slices_for_training[device]
+                while remaining > 0 and (traj_slice := slices.get_at_most(remaining)):
+                    # copy data into the training buffer
+                    start = self.dataset_idx + trajectories_copied 
+                    stop = start + slice_len(traj_slice)
+
+                    # Adjust for circular buffer
+                    if stop > self.dataset_max_size:
+                        # Amount of data that can be copied before reaching the max size
+                        copy_until_max = self.dataset_max_size - start
+
+                        # Copy the first part up to the max size
+                        self.dataset[start:self.dataset_max_size] \
+                            = traj_tensors[traj_slice][:copy_until_max]
+
+                        # Wrap around and copy the remaining part
+                        remaining_to_copy = slice_len(traj_slice) - copy_until_max
+                        self.dataset[0:remaining_to_copy] = \
+                            traj_tensors[traj_slice][copy_until_max:]
+
+                        # Update dataset_idx for circular wrap around
+                        self.dataset_idx = remaining_to_copy
+                        self.dataset_len = self.dataset_max_size
+                    else:
+                        # Copying trajectories to dataset
+                        self.dataset[start:stop] = traj_tensors[traj_slice]
+                        self.dataset_idx += slice_len(traj_slice)
+                        self.dataset_len += slice_len(traj_slice)
+                    
+                    # remember that we need to release these trajectories
+                    self.traj_slices_to_release.append((device, traj_slice))
+
+                    trajectories_copied += slice_len(traj_slice)
+                    remaining = self.traj_per_training_iteration - trajectories_copied
+
+    def _maybe_enqueue_new_training_batches(self):
+        with torch.no_grad():
+            # obtain the index of the available batch buffer
+            while self.available_batches:          
+                #if total_num_trajectories < self.traj_per_training_iteration:
+                    # not enough experience yet to start training 
+                    # break
+
+                # obtain the index of the available batch buffer
+                batch_idx = self.available_batches[0]
+                self.available_batches.pop(0)
+                assert len(self.traj_tensors_to_release[batch_idx]) == 0
+
+                # Randomly sample a batch to use as training data
+                indices = torch.randint(0, self.dataset_len, 
+                                        (self.n_training_trajs,))
+                
+                # TODO: need to do a CPU to GPU transfer?
+                self.training_batches[batch_idx] = self.dataset[indices]
+
+                # signal the learner that we have a new training batch
+                self.training_batches_available.emit(batch_idx)
+
+                if self.cfg.async_rl:
+                    raise NotImplementedError("(ANt) Not implemented for saving batcher (yet?)")
+            
+            pass
+       
+    def on_training_batch_released(self, batch_idx: int, training_iteration: int):
+        """
+        This function is triggered by the learner: once the learner is done with
+        a batch, it is given back to the batcher
+        """
+        with self.timing.add_time("releasing_batches"):
+            self.training_iteration = training_iteration
+
+            self.available_batches.append(batch_idx)
+
+            # print("[???] BATCH IDX RETURNED:", batch_idx, "TRAIN ITERATION:", self.training_iteration, "PREV ITER", self._prev_training_iteration)  # TODO delete
+
+            # Only collect more data when sufficient training iterations have passed
+            if (self.training_iteration - self._prev_training_iteration) >= \
+                self.cfg.train_iter_to_data_collection_ratio:
+                self._release_traj_tensors(batch_idx)
+                self._prev_training_iteration = self.training_iteration
+            
+            # Maybe TODO: have this be a "else" statement for when we do not 
+            #             do data collection instead?
+            self._maybe_enqueue_new_training_batches()
+
+            if self.cfg.async_rl:
+                raise NotImplementedError()
+
+    def _release_traj_tensors(self, batch_idx: int):
+        """
+        Update self.traj_buffer_queues to indicate which queues are open to 
+        store more sampled trajectories; then signal to sampler that
+        trajectory buffers are available
+        """
+        new_sampling_batches = dict()
+
+        if self.cfg.batched_sampling:
+            raise NotImplementedError()
+        else:
+            for device, traj_slice in self.traj_slices_to_release:
+                if device not in new_sampling_batches:
+                    new_sampling_batches[device] = []
+
+                for i in range(traj_slice.start, traj_slice.stop):
+                    new_sampling_batches[device].append(i)
+
+            for device in new_sampling_batches:
+                new_sampling_batches[device].sort()
+
+        self.traj_slices_to_release = []
+
+        for device, batches in new_sampling_batches.items():
+            # log.debug(f'Release trajectories {batches}')
+            self.traj_buffer_queues[device].put_many(batches)
+        self.trajectory_buffers_available.emit(self.policy_id, self.training_iteration)
+        
+
+    def on_stop(self, *args):
+        super().on_stop(*args)

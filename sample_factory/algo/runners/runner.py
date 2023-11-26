@@ -12,7 +12,7 @@ import numpy as np
 from signal_slot.signal_slot import EventLoop, EventLoopObject, EventLoopStatus, Timer, process_name, signal
 from tensorboardX import SummaryWriter
 
-from sample_factory.algo.learning.batcher import Batcher
+from sample_factory.algo.learning.batcher import Batcher, SavingBatcher
 from sample_factory.algo.learning.learner_worker import LearnerWorker
 from sample_factory.algo.sampling.sampler import AbstractSampler
 from sample_factory.algo.utils.env_info import EnvInfo, obtain_env_info_in_a_separate_process
@@ -520,7 +520,14 @@ class Runner(EventLoopObject, Configurable):
             json.dump(cfg_dict(self.cfg), json_file, indent=2)
 
     def _make_batcher(self, event_loop, policy_id: PolicyID):
-        return Batcher(event_loop, policy_id, self.buffer_mgr, self.cfg, self.env_info)
+        if self.cfg.use_saving_batcher:
+            # (Ant) Custom Batcher that batch from saved files
+            return SavingBatcher(event_loop, policy_id, self.buffer_mgr, 
+                                 self.cfg, self.env_info)
+        else:
+            # Default sample-factory Batcher 
+            return Batcher(event_loop, policy_id, self.buffer_mgr, 
+                           self.cfg, self.env_info)
 
     def _make_learner(self, event_loop, policy_id: PolicyID, batcher: Batcher):
         return LearnerWorker(

@@ -228,7 +228,6 @@ class RolloutWorker(HeartbeatStoppableEventLoopObject, Configurable):
             self.emit(new_trajectories_signal(policy_id), rollouts, self.sampling_device)
 
     def advance_rollouts(self, split_idx: int, policy_id: PolicyID) -> None:
-        # TODO: update comment
         """
         Process incoming request from policy worker. Use the data (policy outputs, actions) to advance the simulation
         by one step on the corresponding VectorEnvRunner.
@@ -243,7 +242,7 @@ class RolloutWorker(HeartbeatStoppableEventLoopObject, Configurable):
             with self.timing.add_time("complete_rollouts"):
                 if complete_rollouts:
                     # (Ant) Optional function to save the rollout as numpy files
-                    runner.maybe_save_rollouts_to_file(complete_rollouts)
+                    # runner.maybe_save_rollouts_to_file(complete_rollouts)  # NOTE: not saving for now
                     
                     # NOTE (Ant): the complete_rollouts is a dict pointing to the rollout memory location
                     self._enqueue_complete_rollouts(complete_rollouts)
@@ -258,6 +257,7 @@ class RolloutWorker(HeartbeatStoppableEventLoopObject, Configurable):
                     self.remaining_rollouts[split_idx] -= 1
 
             if episodic_stats:
+                # episodic_stats is a list of dictionary of stats
                 self.report_msg.emit(episodic_stats)
 
             # We finished one step of environment simulation.
@@ -277,8 +277,8 @@ class RolloutWorker(HeartbeatStoppableEventLoopObject, Configurable):
         collect experience for one policy than another). Multi-policy sync mode is thus an experimental feature,
         most of the time you should prefer using cfg.async_rl=True for multi-policy training.
         """
-        if not self.cfg.async_rl:
-            # in sync mode we progress one iteration at a time
+        if (not self.cfg.async_rl) and (not self.cfg.use_saving_batcher):
+            # in sync mode (+ online buffer) we progress one iteration at a time
             assert training_iteration - self.training_iteration[policy_id] in (0, 1)
 
         prev_iteration = min(self.training_iteration)
