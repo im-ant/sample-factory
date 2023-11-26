@@ -164,7 +164,8 @@ class Runner(EventLoopObject, Configurable):
             self.timers.append(t)
 
         periodic(self.report_interval_sec, self._update_stats_and_print_report)
-        periodic(self.summaries_interval_sec, self._report_experiment_summaries)
+        # periodic(self.summaries_interval_sec, self._report_experiment_summaries)  # (Ant) old
+        periodic(self.summaries_interval_sec, self._write_json_experiment_summaries)  # (Ant)
 
         periodic(self.cfg.save_every_sec, self._save_policy)
         periodic(self.cfg.save_best_every_sec, self._save_best_policy)
@@ -296,8 +297,23 @@ class Runner(EventLoopObject, Configurable):
     def _train_stats_handler(runner: Runner, msg: Dict, policy_id: PolicyID) -> None:
         """We write the train summaries to disk right away instead of accumulating them."""
         train_stats = msg[TRAIN_STATS]
+
+        # NOTE (ant): replacing tensorboard with a json writer
+        # for key, scalar in train_stats.items():
+        #     runner.writers[policy_id].add_scalar(f"train/{key}", scalar, runner.env_steps[policy_id])
+        
+        # Below is custom json metrics writer
+        json_metrics = dict()  # json dict to write out
+        json_metrics["env_steps"] = runner.env_steps[policy_id]
+        json_metrics["time_elapsed_seconds"] = runner.total_train_seconds
         for key, scalar in train_stats.items():
-            runner.writers[policy_id].add_scalar(f"train/{key}", scalar, runner.env_steps[policy_id])
+            json_metrics[f"train/{key}"] = scalar
+
+        filename = f'sf-metrics_policy-{policy_id}.json'
+        with open(filename, 'a') as jsonfile:
+            # write to a json file immediately
+            jsonfile.write(json.dumps(json_metrics) + '\n')
+        # Below is custom json metrics writer
 
         for key in ["version_diff_min", "version_diff_max", "version_diff_avg"]:
             if key in train_stats:
@@ -440,6 +456,72 @@ class Runner(EventLoopObject, Configurable):
 
         for w in self.writers.values():
             w.flush()
+
+    def _write_json_experiment_summaries(self):
+        json_metrics = dict()  # json dict to write out
+
+        seconds_elapsed = time.time() - self.start_time
+        self.total_train_seconds = seconds_elapsed  # (Ant) not sure if this is set anywhere else???
+
+        memory_mb = memory_consumption_mb()
+        fps_stats, sample_throughput = self._get_perf_stats()
+        fps = fps_stats[0]
+
+        default_policy = 0
+        for policy_id, env_steps in self.env_steps.items():
+            json_metrics[policy_id] = dict()
+            json_metrics[policy_id]["env_steps"] = env_steps
+            json_metrics[policy_id]["time_elapsed_seconds"] = seconds_elapsed
+
+            if policy_id == default_policy:
+                if not math.isnan(fps):
+                    json_metrics[policy_id]["perf/_fps"] = fps
+
+                json_metrics[policy_id]["stats/master_process_memory_mb"] = float(memory_mb)
+                for key, value in self.avg_stats.items():
+                    if len(value) >= value.maxlen or (len(value) > 10 and seconds_elapsed > 300):
+                        json_metrics[policy_id][f"stats/{key}"] = float(np.mean(value))
+
+                for key, value in self.stats.items():
+                    json_metrics[policy_id][f"stats/{key}"] = value
+
+            if not math.isnan(sample_throughput[policy_id]):
+                json_metrics[policy_id]["perf/_sample_throughput"] = sample_throughput[policy_id]
+
+            for key, stat in self.policy_avg_stats.items():
+                if len(stat[policy_id]) >= stat[policy_id].maxlen or (
+                    len(stat[policy_id]) > 10 and seconds_elapsed > 300
+                ):
+                    stat_value = np.mean(stat[policy_id])
+
+                    if "/" in key:
+                        # custom summaries have their own sections in tensorboard
+                        avg_tag = key
+                        min_tag = f"{key}_min"
+                        max_tag = f"{key}_max"
+                    elif key in ("reward", "len"):
+                        # reward and length get special treatment
+                        avg_tag = f"{key}/{key}"
+                        min_tag = f"{key}/{key}_min"
+                        max_tag = f"{key}/{key}_max"
+                    else:
+                        avg_tag = f"policy_stats/avg_{key}"
+                        min_tag = f"policy_stats/avg_{key}_min"
+                        max_tag = f"policy_stats/avg_{key}_max"
+
+                    json_metrics[policy_id][avg_tag] = float(stat_value)
+
+                    # for key stats report min/max as well
+                    if key in ("reward", "true_objective", "len"):
+                        json_metrics[policy_id][min_tag] = float(min(stat[policy_id]))
+                        json_metrics[policy_id][max_tag] = float(max(stat[policy_id]))
+
+            # write to a json file
+            filename = f'sf-metrics_policy-{policy_id}.json'
+            with open(filename, 'a') as jsonfile:
+                jsonfile.write(json.dumps(json_metrics[policy_id]) + '\n')
+
+            # self._observers_call(AlgoObserver.extra_summaries, self, policy_id, writer, env_steps)
 
     def _propagate_training_info(self):
         """
