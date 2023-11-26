@@ -306,6 +306,7 @@ class Runner(EventLoopObject, Configurable):
         json_metrics = dict()  # json dict to write out
         json_metrics["env_steps"] = runner.env_steps[policy_id]
         json_metrics["time_elapsed_seconds"] = runner.total_train_seconds
+        json_metrics['samples_collected'] = runner.samples_collected[policy_id]
         for key, scalar in train_stats.items():
             json_metrics[f"train/{key}"] = scalar
 
@@ -471,6 +472,7 @@ class Runner(EventLoopObject, Configurable):
         for policy_id, env_steps in self.env_steps.items():
             json_metrics[policy_id] = dict()
             json_metrics[policy_id]["env_steps"] = env_steps
+            json_metrics[policy_id]['samples_collected'] = self.samples_collected[policy_id]
             json_metrics[policy_id]["time_elapsed_seconds"] = seconds_elapsed
 
             if policy_id == default_policy:
