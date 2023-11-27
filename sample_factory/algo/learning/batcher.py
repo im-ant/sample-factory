@@ -411,7 +411,13 @@ class SavingBatcher(Batcher):
                         # Copying trajectories to dataset
                         self.dataset[start:stop] = traj_tensors[traj_slice]
                         self.dataset_idx += slice_len(traj_slice)
-                        self.dataset_len += slice_len(traj_slice)
+                        self.dataset_len = min(
+                            self.dataset_len + slice_len(traj_slice), 
+                            self.dataset_max_size
+                        )
+
+                    # log.debug(f"start: {start}; stop: {stop}; slice_len: {slice_len(traj_slice)}; circle: {stop > self.dataset_max_size}")   # TODO delete debug
+                    # log.debug(f"Dataset idx: {self.dataset_idx};  len: {self.dataset_len}")  # TODO delete debug
                     
                     # remember that we need to release these trajectories
                     self.traj_slices_to_release.append((device, traj_slice))
