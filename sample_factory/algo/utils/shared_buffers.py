@@ -29,7 +29,9 @@ def policy_device(cfg: AttrDict, policy_id: PolicyID) -> torch.device:
     if cfg.device == "cpu":
         return torch.device("cpu")
     else:
-        return torch.device("cuda", index=gpus_for_process(policy_id, 1)[0])
+        # return torch.device("cuda", index=gpus_for_process(policy_id, 1)[0])
+        gpu_device = torch.device(cfg.device)
+        return gpu_device
 
 
 def init_tensor(leading_dimensions: List, tensor_type, tensor_shape, device: torch.device, share: bool) -> Tensor:
