@@ -20,6 +20,7 @@ from sample_factory.algo.utils.heartbeat import HeartbeatStoppableEventLoopObjec
 from sample_factory.algo.utils.misc import (
     EPISODIC,
     LEARNER_ENV_STEPS,
+    LEARNER_TRAIN_STEPS,
     SAMPLES_COLLECTED,
     STATS_KEY,
     TIMING_STATS,
@@ -65,7 +66,7 @@ class AlgoObserver:
         """Called after each training step."""
         pass
 
-    def extra_summaries(self, runner: Runner, policy_id: PolicyID, env_steps: int, writer: SummaryWriter) -> None:
+    def extra_summaries(self, runner: Runner, policy_id: PolicyID, learner_env_steps: int, writer: SummaryWriter) -> None:
         pass
 
     def on_stop(self, runner: Runner) -> None:
@@ -100,8 +101,11 @@ class Runner(EventLoopObject, Configurable):
 
         self.timing = Timing("Runner profile")
 
-        # env_steps counts total number of simulation steps per policy (including frameskipped)
-        self.env_steps: Dict[PolicyID, int] = dict()
+        # learner_env_steps counts total number of simulation steps per policy (including frameskipped)
+        self.learner_env_steps: Dict[PolicyID, int] = dict()
+
+        # number of SGD steps in the learner
+        self.learner_train_steps: Dict[PolicyID, int] = dict()
 
         # samples_collected counts the total number of observations processed by the algorithm
         self.samples_collected = [0 for _ in range(self.cfg.num_policies)]
@@ -149,6 +153,7 @@ class Runner(EventLoopObject, Configurable):
         # handlers for policy-specific messages
         self.policy_msg_handlers: Dict[str, List[PolicyMsgHandler]] = {
             LEARNER_ENV_STEPS: [self._learner_steps_handler],
+            LEARNER_TRAIN_STEPS: [self._learner_train_steps_handler],
             EPISODIC: [self._episodic_stats_handler],
             TRAIN_STATS: [self._train_stats_handler],
             SAMPLES_COLLECTED: [self._samples_stats_handler],
@@ -266,14 +271,20 @@ class Runner(EventLoopObject, Configurable):
 
     @staticmethod
     def _learner_steps_handler(runner: Runner, msg: Dict, policy_id: PolicyID) -> None:
-        env_steps: int = msg[LEARNER_ENV_STEPS]
-        if policy_id in runner.env_steps:
-            delta = env_steps - runner.env_steps[policy_id]
+        learner_env_steps: int = msg[LEARNER_ENV_STEPS]
+        if policy_id in runner.learner_env_steps:
+            delta = learner_env_steps - runner.learner_env_steps[policy_id]
             runner.total_env_steps_since_resume += delta
         elif runner.total_env_steps_since_resume is None:
             runner.total_env_steps_since_resume = 0
 
-        runner.env_steps[policy_id] = env_steps
+        runner.learner_env_steps[policy_id] = learner_env_steps
+    
+    @staticmethod
+    def _learner_train_steps_handler(runner: Runner, msg: Dict, policy_id: PolicyID) -> None:
+        learner_train_steps: int = msg[LEARNER_TRAIN_STEPS]
+        # not updating runner.total_env_steps_since_resume for simplicity
+        runner.learner_train_steps[policy_id] = learner_train_steps
 
     @staticmethod
     def _episodic_stats_handler(runner: Runner, msg: Dict, policy_id: PolicyID) -> None:
@@ -300,13 +311,14 @@ class Runner(EventLoopObject, Configurable):
 
         # NOTE (ant): replacing tensorboard with a json writer
         # for key, scalar in train_stats.items():
-        #     runner.writers[policy_id].add_scalar(f"train/{key}", scalar, runner.env_steps[policy_id])
+        #     runner.writers[policy_id].add_scalar(f"train/{key}", scalar, runner.learner_env_steps[policy_id])
         
         # Below is custom json metrics writer
         json_metrics = dict()  # json dict to write out
-        json_metrics["env_steps"] = runner.env_steps[policy_id]
+        json_metrics["learner_env_steps"] = runner.learner_env_steps[policy_id]
         json_metrics["time_elapsed_seconds"] = runner.total_train_seconds
         json_metrics['samples_collected'] = runner.samples_collected[policy_id]
+        json_metrics["learner_train_steps"] = runner.learner_train_steps[policy_id]
         for key, scalar in train_stats.items():
             json_metrics[f"train/{key}"] = scalar
 
@@ -385,7 +397,7 @@ class Runner(EventLoopObject, Configurable):
         """
 
         # don't have enough statistic from the learners yet
-        if len(self.env_steps) < self.cfg.num_policies:
+        if len(self.learner_env_steps) < self.cfg.num_policies:
             return
 
         if self.total_env_steps_since_resume is None:
@@ -398,7 +410,7 @@ class Runner(EventLoopObject, Configurable):
             self.throughput_stats[policy_id].append((now, self.samples_collected[policy_id]))
 
         fps_stats, sample_throughput = self._get_perf_stats()
-        total_env_steps = sum(self.env_steps.values())
+        total_env_steps = sum(self.learner_env_steps.values())
         self.print_stats(fps_stats, sample_throughput, total_env_steps)
 
     def _report_experiment_summaries(self):
@@ -408,22 +420,22 @@ class Runner(EventLoopObject, Configurable):
         fps = fps_stats[0]
 
         default_policy = 0
-        for policy_id, env_steps in self.env_steps.items():
+        for policy_id, learner_env_steps in self.learner_env_steps.items():
             writer = self.writers[policy_id]
             if policy_id == default_policy:
                 if not math.isnan(fps):
-                    writer.add_scalar("perf/_fps", fps, env_steps)
+                    writer.add_scalar("perf/_leaner_fps", fps, learner_env_steps)
 
-                writer.add_scalar("stats/master_process_memory_mb", float(memory_mb), env_steps)
+                writer.add_scalar("stats/master_process_memory_mb", float(memory_mb), learner_env_steps)
                 for key, value in self.avg_stats.items():
                     if len(value) >= value.maxlen or (len(value) > 10 and self.total_train_seconds > 300):
-                        writer.add_scalar(f"stats/{key}", np.mean(value), env_steps)
+                        writer.add_scalar(f"stats/{key}", np.mean(value), learner_env_steps)
 
                 for key, value in self.stats.items():
-                    writer.add_scalar(f"stats/{key}", value, env_steps)
+                    writer.add_scalar(f"stats/{key}", value, learner_env_steps)
 
             if not math.isnan(sample_throughput[policy_id]):
-                writer.add_scalar("perf/_sample_throughput", sample_throughput[policy_id], env_steps)
+                writer.add_scalar("perf/_sample_throughput", sample_throughput[policy_id], learner_env_steps)
 
             for key, stat in self.policy_avg_stats.items():
                 if len(stat[policy_id]) >= stat[policy_id].maxlen or (
@@ -446,14 +458,14 @@ class Runner(EventLoopObject, Configurable):
                         min_tag = f"policy_stats/avg_{key}_min"
                         max_tag = f"policy_stats/avg_{key}_max"
 
-                    writer.add_scalar(avg_tag, float(stat_value), env_steps)
+                    writer.add_scalar(avg_tag, float(stat_value), learner_env_steps)
 
                     # for key stats report min/max as well
                     if key in ("reward", "true_objective", "len"):
-                        writer.add_scalar(min_tag, float(min(stat[policy_id])), env_steps)
-                        writer.add_scalar(max_tag, float(max(stat[policy_id])), env_steps)
+                        writer.add_scalar(min_tag, float(min(stat[policy_id])), learner_env_steps)
+                        writer.add_scalar(max_tag, float(max(stat[policy_id])), learner_env_steps)
 
-            self._observers_call(AlgoObserver.extra_summaries, self, policy_id, writer, env_steps)
+            self._observers_call(AlgoObserver.extra_summaries, self, policy_id, writer, learner_env_steps)
 
         for w in self.writers.values():
             w.flush()
@@ -469,10 +481,11 @@ class Runner(EventLoopObject, Configurable):
         fps = fps_stats[0]
 
         default_policy = 0
-        for policy_id, env_steps in self.env_steps.items():
+        for policy_id, learner_env_steps in self.learner_env_steps.items():
             json_metrics[policy_id] = dict()
-            json_metrics[policy_id]["env_steps"] = env_steps
+            json_metrics[policy_id]["learner_env_steps"] = learner_env_steps
             json_metrics[policy_id]['samples_collected'] = self.samples_collected[policy_id]
+            json_metrics[policy_id]["learner_train_steps"] = self.learner_train_steps[policy_id]
             json_metrics[policy_id]["time_elapsed_seconds"] = seconds_elapsed
 
             if policy_id == default_policy:
@@ -523,7 +536,7 @@ class Runner(EventLoopObject, Configurable):
             with open(filename, 'a') as jsonfile:
                 jsonfile.write(json.dumps(json_metrics[policy_id]) + '\n')
 
-            # self._observers_call(AlgoObserver.extra_summaries, self, policy_id, writer, env_steps)
+            # self._observers_call(AlgoObserver.extra_summaries, self, policy_id, writer, learner_env_steps)
 
     def _propagate_training_info(self):
         """
@@ -536,7 +549,7 @@ class Runner(EventLoopObject, Configurable):
             training_info[policy_id] = dict(
                 policy_id=policy_id,
                 # "approx" here because it will lag behind a little bit due to the async nature of the system
-                approx_total_training_steps=self.env_steps.get(policy_id, 0),
+                approx_total_training_steps=self.learner_env_steps.get(policy_id, 0),
                 reward_shaping=self.reward_shaping[policy_id],
                 # add more stats if needed (commented by default for efficiency)
                 # stats=self.stats,
@@ -561,15 +574,15 @@ class Runner(EventLoopObject, Configurable):
 
     def _save_best_policy(self):
         # don't have enough statistic from the learners yet
-        if len(self.env_steps) < self.cfg.num_policies:
+        if len(self.learner_env_steps) < self.cfg.num_policies:
             return
 
         metric = self.cfg.save_best_metric
         if metric in self.policy_avg_stats:
             for policy_id in range(self.cfg.num_policies):
                 # check if number of samples collected is greater than cfg.save_best_after
-                env_steps = self.env_steps[policy_id]
-                if env_steps < self.cfg.save_best_after:
+                learner_env_steps = self.learner_env_steps[policy_id]
+                if learner_env_steps < self.cfg.save_best_after:
                     continue
 
                 stats = self.policy_avg_stats[metric][policy_id]
@@ -788,8 +801,14 @@ class Runner(EventLoopObject, Configurable):
         self._observers_call(AlgoObserver.on_connect_components, self)
 
     def _should_end_training(self):
-        end = len(self.env_steps) > 0 and all(s > self.cfg.train_for_env_steps for s in self.env_steps.values())
+        # Termination conditions below
+        end = len(self.learner_env_steps) > 0 and \
+            all(s > self.cfg.train_for_learner_env_steps 
+                for s in self.learner_env_steps.values())
+        
         end |= self.total_train_seconds > self.cfg.train_for_seconds
+        end |= all(s > self.cfg.train_for_samples_collected 
+                   for s in self.samples_collected)
         return end
 
     def _after_training_iteration(self, training_iteration_since_resume: int):
@@ -871,5 +890,5 @@ class Runner(EventLoopObject, Configurable):
         if self.total_env_steps_since_resume is None:
             self.total_env_steps_since_resume = 0
         fps = self.total_env_steps_since_resume / self.timing.main_loop
-        log.info("Collected %r, FPS: %.1f", self.env_steps, fps)
+        log.info("Collected %r, FPS: %.1f", self.learner_env_steps, fps)
         return self.status
