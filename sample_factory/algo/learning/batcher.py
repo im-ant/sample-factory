@@ -2,8 +2,10 @@ import random
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
+from torch.utils.data import DataLoader
 from signal_slot.signal_slot import EventLoop, signal
 
+from sample_factory.algo.learning.dataset_utils import BatcherRamDataset
 from sample_factory.algo.utils.env_info import EnvInfo
 from sample_factory.algo.utils.heartbeat import HeartbeatStoppableEventLoopObject
 from sample_factory.algo.utils.shared_buffers import BufferMgr, alloc_trajectory_tensors, policy_device
@@ -278,7 +280,7 @@ class Batcher(HeartbeatStoppableEventLoopObject):
 
 
 # ==
-# 
+# Saving buffer using pytorch dataloader
 class SavingBatcher(Batcher):
     """
     Batcher that saves in memory all sampled trajectories to sample from
@@ -309,11 +311,10 @@ class SavingBatcher(Batcher):
         self.training_iteration: int = 0
         self._prev_training_iteration: int = 0
 
-        # Saving buffer items
-        self.dataset: TensorDict = None
-        self.dataset_max_size: int = None
-        self.dataset_idx: int = None
-        self.dataset_len: int = None
+        # Dataset items
+        self.dataset: BatcherRamDataset = None
+        self._dataloader: DataLoader = None
+        
     
     def init(self):
         self.tr_device = policy_device(self.cfg, self.policy_id)
@@ -335,18 +336,23 @@ class SavingBatcher(Batcher):
         #       the amount required to fill this dataset, also figure out
         #       the CPU-GPU memory transfer step (have it be on CPU and switch)
         #       to GPU here when sending to learner
-        self.dataset_max_size = self.cfg.saving_batcher_max_size
-        rollout_length = self.cfg.rollout
-        self.dataset = alloc_trajectory_tensors(
-            self.env_info,
-            self.dataset_max_size,
-            rollout_length,
-            rnn_spaces,
-            device="cpu",
-            share=False,
-        )
-        self.dataset_idx = 0
-        self.dataset_len = 0
+
+        self.dataset = BatcherRamDataset(
+            max_size=self.cfg.saving_batcher_max_size, 
+            rollout_length=self.cfg.rollout, 
+            env_info=self.env_info, 
+            rnn_spaces=rnn_spaces, 
+            device="cpu", 
+            share=False
+        )  # TODO add a seed=???
+
+        # pytorch dataloader 
+        # TODO customize this, make better; worker is 0 for serial mode and some number otherwise,
+        # other TODO's include pinning memories, etc.
+        self._dataloader = DataLoader(
+            self.dataset, batch_size=self.n_training_trajs, num_workers=0,
+        )  
+        self._data_iter = None
 
         self.initialized.emit()
 
@@ -367,7 +373,11 @@ class SavingBatcher(Batcher):
                 self._n_slices_merged += slice_len(trajectory_slice)
 
             self._maybe_enqueue_new_trajectory_data()
-            if self.dataset_len >= self.n_training_trajs:
+
+            # TODO: make better the condition here (e.g. pre-training)
+            if len(self.dataset) >= self.n_training_trajs:
+                self._data_iter = iter(self._dataloader)
+                # TODO: reset the iterable or something for dataloading
                 self._maybe_enqueue_new_training_batches() 
 
     def _maybe_enqueue_new_trajectory_data(self):
@@ -386,38 +396,8 @@ class SavingBatcher(Batcher):
                 traj_tensors = self.traj_tensors[device]
                 slices = self.slices_for_training[device]
                 while remaining > 0 and (traj_slice := slices.get_at_most(remaining)):
-                    # copy data into the training buffer
-                    start = self.dataset_idx + trajectories_copied 
-                    stop = start + slice_len(traj_slice)
-
-                    # Adjust for circular buffer
-                    if stop > self.dataset_max_size:
-                        # Amount of data that can be copied before reaching the max size
-                        copy_until_max = self.dataset_max_size - start
-
-                        # Copy the first part up to the max size
-                        self.dataset[start:self.dataset_max_size] \
-                            = traj_tensors[traj_slice][:copy_until_max]
-
-                        # Wrap around and copy the remaining part
-                        remaining_to_copy = slice_len(traj_slice) - copy_until_max
-                        self.dataset[0:remaining_to_copy] = \
-                            traj_tensors[traj_slice][copy_until_max:]
-
-                        # Update dataset_idx for circular wrap around
-                        self.dataset_idx = remaining_to_copy
-                        self.dataset_len = self.dataset_max_size
-                    else:
-                        # Copying trajectories to dataset
-                        self.dataset[start:stop] = traj_tensors[traj_slice]
-                        self.dataset_idx += slice_len(traj_slice)
-                        self.dataset_len = min(
-                            self.dataset_len + slice_len(traj_slice), 
-                            self.dataset_max_size
-                        )
-
-                    # log.debug(f"start: {start}; stop: {stop}; slice_len: {slice_len(traj_slice)}; circle: {stop > self.dataset_max_size}")   # TODO delete debug
-                    # log.debug(f"Dataset idx: {self.dataset_idx};  len: {self.dataset_len}")  # TODO delete debug
+                    self.dataset.add(traj_tensors[traj_slice])  
+                    # log.debug(f"slice: {traj_slice}; dataset size: {len(self.dataset)}")
                     
                     # remember that we need to release these trajectories
                     self.traj_slices_to_release.append((device, traj_slice))
@@ -438,12 +418,13 @@ class SavingBatcher(Batcher):
                 self.available_batches.pop(0)
                 assert len(self.traj_tensors_to_release[batch_idx]) == 0
 
-                # Randomly sample a batch to use as training data
-                indices = torch.randint(0, self.dataset_len, 
-                                        (self.n_training_trajs,))
-                
-                # TODO: need to do a CPU to GPU transfer?
-                self.training_batches[batch_idx] = self.dataset[indices]
+                try:
+                    batch = next(self._data_iter)
+                except StopIteration:
+                    self._data_iter = iter(self._dataloader)
+                    batch = next(self._data_iter)
+
+                self.training_batches[batch_idx] = batch
 
                 # signal the learner that we have a new training batch
                 self.training_batches_available.emit(batch_idx)
