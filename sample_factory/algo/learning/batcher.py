@@ -310,7 +310,7 @@ class SavingBatcher(Batcher):
         # ]  # TODO: I think these two are not used?
 
         self.training_iteration: int = 0
-        self._prev_training_iteration: int = 0
+        self._prev_data_collect_iteration: int = 0
 
         # Dataset items
         self.dataset: BatcherRamDataset = None
@@ -452,14 +452,16 @@ class SavingBatcher(Batcher):
 
             self.available_batches.append(batch_idx)
 
-            # print(f"[Batcher] training iter {training_iteration}")  # TODO delete
-            # TODO e.g. before training iter we will not colelct more data but will only enqueue new batches
+            # Determining whether to collect more data or not
+            collect_more_data = (
+                ((self.training_iteration - self._prev_data_collect_iteration) 
+                 >= self.cfg.train_iter_to_data_collection_ratio) and
+                (self.training_iteration > self.cfg.min_initial_train_iters) 
+            )
 
-            # Only collect more data when sufficient training iterations have passed
-            if (self.training_iteration - self._prev_training_iteration) >= \
-                self.cfg.train_iter_to_data_collection_ratio:
+            if collect_more_data:
                 self._release_traj_tensors()
-                self._prev_training_iteration = self.training_iteration
+                self._prev_data_collect_iteration = self.training_iteration
             
             # Maybe TODO: have this be a "else" statement for when we do not 
             #             do data collection instead?
