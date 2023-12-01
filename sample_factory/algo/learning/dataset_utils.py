@@ -43,8 +43,11 @@ class BatcherRamDataset(Dataset):
         self._cur_len = 0
 
     def __len__(self):
-        # TODO: update this to convert it tok a better number
-        return self._cur_len
+        return self._cur_len 
+
+    @property
+    def num_samples(self):
+        return self._cur_len * self._rollout_length
     
     def add(self, trajectory: TensorDict):
         """

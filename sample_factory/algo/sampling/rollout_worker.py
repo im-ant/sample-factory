@@ -284,7 +284,7 @@ class RolloutWorker(HeartbeatStoppableEventLoopObject, Configurable):
         prev_iteration = min(self.training_iteration)
         self.training_iteration[policy_id] = training_iteration
         curr_iteration = min(self.training_iteration)
-        if curr_iteration > prev_iteration:
+        if self.cfg.ignore_training_iter_for_rollout or (curr_iteration > prev_iteration):
             # allow runners to collect the next portion of rollouts
             self.remaining_rollouts = [self.rollouts_per_iteration for _ in range(self.num_splits)]
 

@@ -9,7 +9,7 @@ from sample_factory.algo.learning.dataset_utils import BatcherRamDataset
 from sample_factory.algo.utils.env_info import EnvInfo
 from sample_factory.algo.utils.heartbeat import HeartbeatStoppableEventLoopObject
 from sample_factory.algo.utils.shared_buffers import BufferMgr, alloc_trajectory_tensors, policy_device
-from sample_factory.algo.utils.tensor_dict import TensorDict
+from sample_factory.algo.utils.tensor_dict import TensorDict, clone_tensordict
 from sample_factory.model.model_utils import get_rnn_size, get_rnn_info
 from sample_factory.utils.attr_dict import AttrDict
 from sample_factory.utils.timing import Timing
@@ -297,6 +297,7 @@ class SavingBatcher(Batcher):
         self.n_training_trajs = None
         self.training_batches: List[TensorDict] = [] 
         self.tr_device = None
+        self.min_saving_samples = None
 
         self.max_batches_to_accumulate = cfg.num_batches_to_accumulate
         self.traj_slices_to_release: List[Tuple[Device, slice]] = []
@@ -315,7 +316,6 @@ class SavingBatcher(Batcher):
         self.dataset: BatcherRamDataset = None
         self._dataloader: DataLoader = None
         
-    
     def init(self):
         self.tr_device = policy_device(self.cfg, self.policy_id)
         rnn_spaces = get_rnn_info(self.cfg)
@@ -337,6 +337,8 @@ class SavingBatcher(Batcher):
         #       the CPU-GPU memory transfer step (have it be on CPU and switch)
         #       to GPU here when sending to learner
 
+        self.min_saving_samples = self.cfg.min_saving_samples
+
         self.dataset = BatcherRamDataset(
             max_size=self.cfg.saving_batcher_max_size, 
             rollout_length=self.cfg.rollout, 
@@ -351,7 +353,7 @@ class SavingBatcher(Batcher):
         # other TODO's include pinning memories, etc.
         self._dataloader = DataLoader(
             self.dataset, batch_size=self.n_training_trajs, num_workers=0,
-        )  
+        ) 
         self._data_iter = None
 
         self.initialized.emit()
@@ -372,13 +374,19 @@ class SavingBatcher(Batcher):
 
                 self._n_slices_merged += slice_len(trajectory_slice)
 
+            # add to dataset
             self._maybe_enqueue_new_trajectory_data()
-
-            # TODO: make better the condition here (e.g. pre-training)
-            if len(self.dataset) >= self.n_training_trajs:
+            
+            # collect a minimum amount of data before starting training
+            if self.dataset.num_samples < self.min_saving_samples: 
+                log.debug(
+                    f"Samples in dataset: {self.dataset.num_samples}; "
+                    f"Min samples to start training: {self.min_saving_samples}"
+                )
+                self._release_traj_tensors()  # signal to do more rollouts
+            else:
                 self._data_iter = iter(self._dataloader)
-                # TODO: reset the iterable or something for dataloading
-                self._maybe_enqueue_new_training_batches() 
+                self._maybe_enqueue_new_training_batches()  # train signal
 
     def _maybe_enqueue_new_trajectory_data(self):
         with torch.no_grad():
@@ -396,7 +404,7 @@ class SavingBatcher(Batcher):
                 traj_tensors = self.traj_tensors[device]
                 slices = self.slices_for_training[device]
                 while remaining > 0 and (traj_slice := slices.get_at_most(remaining)):
-                    self.dataset.add(traj_tensors[traj_slice])  
+                    self.dataset.add(clone_tensordict(traj_tensors[traj_slice]))
                     # log.debug(f"slice: {traj_slice}; dataset size: {len(self.dataset)}")
                     
                     # remember that we need to release these trajectories
@@ -444,12 +452,13 @@ class SavingBatcher(Batcher):
 
             self.available_batches.append(batch_idx)
 
-            # print("[???] BATCH IDX RETURNED:", batch_idx, "TRAIN ITERATION:", self.training_iteration, "PREV ITER", self._prev_training_iteration)  # TODO delete
+            # print(f"[Batcher] training iter {training_iteration}")  # TODO delete
+            # TODO e.g. before training iter we will not colelct more data but will only enqueue new batches
 
             # Only collect more data when sufficient training iterations have passed
             if (self.training_iteration - self._prev_training_iteration) >= \
                 self.cfg.train_iter_to_data_collection_ratio:
-                self._release_traj_tensors(batch_idx)
+                self._release_traj_tensors()
                 self._prev_training_iteration = self.training_iteration
             
             # Maybe TODO: have this be a "else" statement for when we do not 
@@ -459,7 +468,7 @@ class SavingBatcher(Batcher):
             if self.cfg.async_rl:
                 raise NotImplementedError()
 
-    def _release_traj_tensors(self, batch_idx: int):
+    def _release_traj_tensors(self):
         """
         Update self.traj_buffer_queues to indicate which queues are open to 
         store more sampled trajectories; then signal to sampler that
