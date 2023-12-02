@@ -294,7 +294,6 @@ class SavingBatcher(Batcher):
         super().__init__(evt_loop, policy_id, buffer_mgr, cfg, env_info)
 
         # repeat of some things in super().__init__(...) for clarity
-        self.n_training_trajs = None
         self.training_batches: List[TensorDict] = [] 
         self.tr_device = None
         self.min_saving_samples = None
@@ -320,13 +319,14 @@ class SavingBatcher(Batcher):
         self.tr_device = policy_device(self.cfg, self.policy_id)
         rnn_spaces = get_rnn_info(self.cfg)
         
-        self.n_training_trajs = self.cfg.batch_n_trajectories
         for i in range(self.max_batches_to_accumulate):
+            tr_len = self.cfg.rollout if self.cfg.saving_batcher.sample_whole_trajectories \
+                else self.cfg.saving_batcher.sample_length
             training_batch = alloc_trajectory_tensors(
-                self.env_info,
-                self.n_training_trajs,
-                self.cfg.rollout,
-                rnn_spaces,
+                env_info=self.env_info,
+                num_traj=self.cfg.saving_batcher.train_n_trajectories,
+                rollout=tr_len,
+                rnn_spaces=rnn_spaces,
                 device=self.tr_device,
                 share=False,
             )
@@ -340,10 +340,12 @@ class SavingBatcher(Batcher):
         self.min_saving_samples = self.cfg.min_saving_samples
 
         self.dataset = BatcherRamDataset(
-            max_size=self.cfg.saving_batcher_max_size, 
+            max_size=self.cfg.saving_batcher.max_size, 
             rollout_length=self.cfg.rollout, 
             env_info=self.env_info, 
             rnn_spaces=rnn_spaces, 
+            sample_whole_trajectories=self.cfg.saving_batcher.sample_whole_trajectories, 
+            sample_length=self.cfg.saving_batcher.sample_length,
             device="cpu", 
             share=False
         )  # TODO add a seed=???
@@ -352,7 +354,9 @@ class SavingBatcher(Batcher):
         # TODO customize this, make better; worker is 0 for serial mode and some number otherwise,
         # other TODO's include pinning memories, etc.
         self._dataloader = DataLoader(
-            self.dataset, batch_size=self.n_training_trajs, num_workers=0,
+            self.dataset, 
+            batch_size=self.cfg.saving_batcher.train_n_trajectories, 
+            num_workers=0,
         ) 
         self._data_iter = None
 
@@ -453,9 +457,10 @@ class SavingBatcher(Batcher):
             self.available_batches.append(batch_idx)
 
             # Determining whether to collect more data or not
+            # TODO: add a more involved training ratio based on data sampling
             collect_more_data = (
                 ((self.training_iteration - self._prev_data_collect_iteration) 
-                 >= self.cfg.train_iter_to_data_collection_ratio) and
+                 >= self.cfg.saving_batcher.train_iter_to_data_collection_ratio) and
                 (self.training_iteration > self.cfg.min_initial_train_iters) 
             )
 

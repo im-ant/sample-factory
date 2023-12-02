@@ -15,13 +15,23 @@ from sample_factory.utils.utils import debug_log_every_n, log
 
 class BatcherRamDataset(Dataset):
     """In-RAM dataset of tensor trajectories"""
-    def __init__(self, max_size, rollout_length, env_info, rnn_spaces, device, 
-                 share=False, seed=None):
+    def __init__(self, max_size, rollout_length, env_info, rnn_spaces, 
+                 sample_whole_trajectories, sample_length,
+                 device, share=False, seed=None):
 
         self._max_size = max_size
         self._rollout_length = rollout_length
         self._env_info = env_info
         self._rnn_spaces = rnn_spaces
+
+        self._sample_whole_trajectories = sample_whole_trajectories
+        self._sample_length = sample_length
+        if self._sample_whole_trajectories:
+            log.debug(
+                f"[BatcherRamDataset init] Sampling whole trajectories (rollout_length={rollout_length}), "
+                f"ignoring sample_length={sample_length}."
+            )
+
         self._device = device
         self._share = share
         
@@ -80,36 +90,83 @@ class BatcherRamDataset(Dataset):
     
         return True
 
-    def __getitem__(self, idx):
-        # NOTE TODO: for now using the full tajectory. Later should implement
-        # some kind of timestep sampling and stitching (have to take care of
-        # indexing)
-        # Also maybe TODO:
-        #  - after this: see how to efficiently move things aroudn on memory
-        #  - add the reference to NM's repo for how we might want to implement this
-        data_traj = clone_tensordict(self._data[idx])
-
-        # NOTE: this is a custom if-then written just for NM's dreamer implementation
-        if "is_first" in data_traj['obs']:
-            data_traj['obs']['is_first'][0] = True
+    @staticmethod
+    def _proess_data_traj(data_traj: TensorDict):
+        # The trajectory tensor from the alloc_trajectory_tensors function
+        # (in algo.util.shared_buffers) have an extra step for some of the 
+        # keys, here we remove the final extra step from those keys
+        keys_with_extra_step = ["obs", "rnn_states", "values", "valids"]
+        for k in keys_with_extra_step:
+            data_traj[k] = data_traj[k][:-1]
         
         return data_traj
+    
+    def _alloc_flat_trajectory_tensors(self, trajectory_length):
+        """Allocate a "flat" trajectory tensor to store sample output"""
+        output_data_traj = alloc_trajectory_tensors(
+            env_info=self._env_info,
+            num_traj=1,
+            rollout=trajectory_length,
+            rnn_spaces=self._rnn_spaces,
+            device=self._device,  # TODO change this?
+            share=self._share,
+        )  # NOTE: this has one more dimensions
 
+        # the allocated tensors have dimension (1, trajectory_length, ...), we 
+        # will squeeze out the first dimension to be (trajectory_length, ...)
+        def rec_squeeze(d):
+            for k in d:
+                if isinstance(d[k], dict):
+                    d[k] = rec_squeeze(d[k])
+                else:
+                    d[k] = d[k].squeeze(0)
+            return d
+        
+        output_data_traj = rec_squeeze(output_data_traj)
+        return self._proess_data_traj(output_data_traj)
 
-class DatasetSampler(Sampler):
-    """Custom trajectory sampler; inherits from torch.utils.data.Sampler"""
-    def __init__(self, dataset):
-        self._dataset = dataset
+    def __getitem__(self, idx):
+        # Get data trajectory from buffer
+        cur_data_traj = self._data[idx]
+        cur_data_traj = self._proess_data_traj(clone_tensordict(cur_data_traj))
 
-    def __iter__(self):
-        # Implement your custom sampling logic here
-        # For example, randomly sample indices
-        import pdb; pdb.set_trace()
-        indices = torch.randperm(len(self._dataset)).tolist()
-        import pdb; pdb.set_trace()
-        return iter(indices)
+        # If we are sampling full trajectories, just returned the full trajectory 
+        if self._sample_whole_trajectories:            
+            if "is_first" in cur_data_traj['obs']:
+                # this is only used for NM's dreamerv3 implementation
+                # https://github.com/im-ant/dreamerv3-torch/blob/main/tools.py#L346
+                cur_data_traj['obs']['is_first'][0] = True
+            return cur_data_traj
+        
+        # Sample sub-trajectories and stitch them together
+        traj_len_total = self._sample_length
+        output_data_traj = self._alloc_flat_trajectory_tensors(traj_len_total)
 
-    def __len__(self):
-        return len(self.data_source)
+        # fill the output_data_traj with trajectories
+        traj_len_sofar = 0
+        while traj_len_sofar < traj_len_total:
+            cur_traj_len = cur_data_traj['dones'].shape[0] 
 
+            # start index and possible trajectory length to copy
+            t_idx = self._rng.randint(0, cur_traj_len-1) \
+                if (traj_len_sofar == 0) else 0
+            cp_len = min(traj_len_total-traj_len_sofar, cur_traj_len - t_idx)
+
+            # copy data
+            output_data_traj[traj_len_sofar : traj_len_sofar + cp_len] = \
+                cur_data_traj[t_idx : t_idx + cp_len]
+                        
+            if "is_first" in output_data_traj['obs']:
+                # this is only used for NM's dreamerv3 implementation
+                # https://github.com/im-ant/dreamerv3-torch/blob/main/tools.py#L346
+                output_data_traj['obs']['is_first'][traj_len_sofar] = True
+
+            # prep for next trajectory
+            traj_len_sofar += cp_len
+            if traj_len_sofar < traj_len_total:
+                new_idx = self._rng.randint(0, len(self))
+                cur_data_traj = self._proess_data_traj(
+                    clone_tensordict(self._data[new_idx]))
+
+        return output_data_traj
 
