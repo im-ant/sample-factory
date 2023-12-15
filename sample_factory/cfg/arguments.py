@@ -203,12 +203,21 @@ def verify_cfg(cfg: Config, env_info: EnvInfo) -> bool:
     return good_config
 
 
+def dict_to_attrdict(d: dict) -> AttrDict:
+    """Recursively turn a python dictionary into a AttrDict"""
+    assert isinstance(d, dict)
+    for k in d:
+        if isinstance(d[k], dict):
+            d[k] = dict_to_attrdict(d[k])
+    return AttrDict(d)
+
+
 def cfg_dict(cfg: Config) -> AttrDict:
     if isinstance(cfg, dict):
-        return AttrDict(cfg)
+        return dict_to_attrdict(cfg)
     elif isinstance(cfg, omegaconf.dictconfig.DictConfig):
         cfg = omegaconf.OmegaConf.to_container(cfg)  # to dict
-        return AttrDict(cfg)
+        return dict_to_attrdict(cfg)
     else:
         return AttrDict(vars(cfg))
 
@@ -275,6 +284,6 @@ def maybe_load_from_checkpoint(cfg: Config) -> AttrDict:
     if not os.path.isfile(filename):
         log.warning("Saved parameter configuration for experiment %s not found!", cfg.experiment)
         log.warning("Starting experiment from scratch!")
-        return AttrDict(vars(cfg))
+        return cfg_dict(cfg)
 
     return load_from_checkpoint(cfg)
