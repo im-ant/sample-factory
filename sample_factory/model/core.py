@@ -24,14 +24,14 @@ class ModelCoreRNN(ModelCore):
         self.is_gru = False
 
         if cfg.rnn_type == "gru":
-            self.core = nn.GRU(input_size, cfg.rnn_size, cfg.rnn_num_layers)
+            self.core = nn.GRU(input_size, cfg.rnn_determinstic_size, cfg.rnn_num_layers)
             self.is_gru = True
         elif cfg.rnn_type == "lstm":
-            self.core = nn.LSTM(input_size, cfg.rnn_size, cfg.rnn_num_layers)
+            self.core = nn.LSTM(input_size, cfg.rnn_determinstic_size, cfg.rnn_num_layers)
         else:
             raise RuntimeError(f"Unknown RNN type {cfg.rnn_type}")
 
-        self.core_output_size = cfg.rnn_size
+        self.core_output_size = cfg.rnn_determinstic_size
         self.rnn_num_layers = cfg.rnn_num_layers
 
     def forward(self, head_output, rnn_states):
@@ -48,7 +48,7 @@ class ModelCoreRNN(ModelCore):
         if self.is_gru:
             x, new_rnn_states = self.core(head_output, rnn_states.contiguous())
         else:
-            h, c = torch.split(rnn_states, self.cfg.rnn_size, dim=2)
+            h, c = torch.split(rnn_states, self.cfg.rnn_determinstic_size, dim=2)
             x, (h, c) = self.core(head_output, (h.contiguous(), c.contiguous()))
             new_rnn_states = torch.cat((h, c), dim=2)
 
