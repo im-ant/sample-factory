@@ -43,7 +43,10 @@ def get_rnn_info(cfg):
         spaces["deter"] = RNNSpace(dtype="float32", shape=(1,))
 
     if cfg.rnn_type == "lstm":
-        raise NotImplementedError
+        raise NotImplementedError  # TODO 2023-12-15; need to check this work 
+        #import pdb; pdb.set_trace()
+        #for k in spaces:
+        #    spaces[k].shape   double the space?    
 
     if not cfg.actor_critic_share_weights:
         # actor and critic need separate states
@@ -51,6 +54,12 @@ def get_rnn_info(cfg):
         raise NotImplementedError
 
     return spaces
+
+
+def get_goal_size(cfg):
+    """AC: get size of goal from cfg"""
+    goal_size = cfg.goal_size
+    return goal_size
 
 
 def nonlinearity(cfg: Config, inplace: bool = False) -> nn.Module:

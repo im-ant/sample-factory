@@ -10,7 +10,7 @@ from sample_factory.algo.utils.env_info import EnvInfo
 from sample_factory.algo.utils.heartbeat import HeartbeatStoppableEventLoopObject
 from sample_factory.algo.utils.shared_buffers import BufferMgr, alloc_trajectory_tensors, policy_device
 from sample_factory.algo.utils.tensor_dict import TensorDict, clone_tensordict
-from sample_factory.model.model_utils import get_rnn_size, get_rnn_info
+from sample_factory.model.model_utils import get_rnn_size, get_rnn_info, get_goal_size
 from sample_factory.utils.attr_dict import AttrDict
 from sample_factory.utils.timing import Timing
 from sample_factory.utils.typing import Device, PolicyID
@@ -150,12 +150,14 @@ class Batcher(HeartbeatStoppableEventLoopObject):
     def init(self):
         device = policy_device(self.cfg, self.policy_id)
         rnn_spaces = get_rnn_info(self.cfg)
+        goal_size = get_goal_size(self.cfg)
         for i in range(self.max_batches_to_accumulate):
             training_batch = alloc_trajectory_tensors(
                 self.env_info,
                 self.traj_per_training_iteration,
                 self.cfg.rollout,
                 rnn_spaces,
+                goal_size,
                 device,
                 False,
             )

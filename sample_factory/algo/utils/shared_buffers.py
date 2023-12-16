@@ -16,7 +16,7 @@ from sample_factory.algo.utils.rl_utils import trajectories_per_training_iterati
 from sample_factory.algo.utils.tensor_dict import TensorDict
 from sample_factory.algo.utils.torch_utils import to_torch_dtype
 from sample_factory.cfg.configurable import Configurable
-from sample_factory.model.model_utils import get_rnn_size, get_rnn_info
+from sample_factory.model.model_utils import get_rnn_size, get_rnn_info, get_goal_size
 from sample_factory.utils.attr_dict import AttrDict
 from sample_factory.utils.gpu_utils import gpus_for_process
 from sample_factory.utils.typing import Device, MpQueue, PolicyID
@@ -66,7 +66,8 @@ def action_info(env_info: EnvInfo) -> Tuple[int, int]:
     return num_actions, num_action_distribution_parameters
 
 
-def policy_output_shapes(num_actions, num_action_distribution_parameters) -> List[Tuple[str, List]]:
+def policy_output_shapes(num_actions, num_action_distribution_parameters,
+                         goal_size) -> List[Tuple[str, List]]:
     # policy outputs, this matches the expected output of the actor-critic
     policy_outputs = [
         ("actions", [num_actions]),
@@ -74,11 +75,13 @@ def policy_output_shapes(num_actions, num_action_distribution_parameters) -> Lis
         ("log_prob_actions", []),
         ("values", []),
         ("policy_version", []),
+        ("goals", [goal_size]),
     ]
     return policy_outputs
 
 
-def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, device, share) -> TensorDict:
+def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, 
+                             goal_size, device, share) -> TensorDict:
     """
     Allocate memory spaces to store trajectory tensors
     """
@@ -102,7 +105,7 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, d
             device, share)
 
     num_actions, num_action_distribution_parameters = action_info(env_info)
-    policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters)
+    policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters, goal_size)
 
     # we need one more step to hold values for the last step
     outputs_with_extra_rollout_step = ["values"]
@@ -111,6 +114,7 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, d
         assert name not in tensors
         rollout_len = rollout + 1 if name in outputs_with_extra_rollout_step else rollout
         tensors[name] = init_tensor([num_traj, rollout_len], torch.float32, shape, device, share)
+    
 
     # env outputs
     tensors["rewards"] = init_tensor([num_traj, rollout], torch.float32, [], device, share)
@@ -133,7 +137,8 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, d
     return tensors
 
 
-def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_spaces, device, share):
+def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_spaces, goal_size, 
+                                device, share):
     num_agents = env_info.num_agents
     envs_per_split = cfg.num_envs_per_worker // cfg.worker_num_splits
 
@@ -144,7 +149,7 @@ def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_spaces, device, shar
         policy_outputs_shape += [envs_per_split, num_agents]
 
     num_actions, num_action_distribution_parameters = action_info(env_info)
-    policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters)
+    policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters, goal_size)
     # policy_outputs += [("new_rnn_states", [rnn_spaces['deterministic'].shape[0]])]  # different name so we don't override current step rnn_state
 
     output_names, output_shapes = list(zip(*policy_outputs))
@@ -195,6 +200,7 @@ class BufferMgr(Configurable):
             self.buffers_per_device[sampling_device] = buffers_for_device
 
         self.rnn_spaces = get_rnn_info(cfg)  # in case we have RNNs
+        self.goal_size = get_goal_size(cfg)  # AC: goal conditioned policy
 
         self.trajectories_per_training_iteration = trajectories_per_training_iteration(cfg)
 
@@ -245,11 +251,12 @@ class BufferMgr(Configurable):
                 num_buffers,
                 cfg.rollout,
                 self.rnn_spaces,
+                self.goal_size,
                 device,
                 share,
             )
             self.policy_output_tensors_torch[device], output_names, output_sizes = alloc_policy_output_tensors(
-                cfg, env_info, self.rnn_spaces, device, share
+                cfg, env_info, self.rnn_spaces, self.goal_size, device, share
             )
             self.output_names, self.output_sizes = output_names, output_sizes
 
