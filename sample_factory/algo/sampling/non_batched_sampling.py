@@ -279,7 +279,22 @@ class ActorState:
             policy_buffers[policy_id] = traj_buffer_idx
 
             t_id = f"{policy_id}_{self.worker_idx}_{self.split_idx}_{self.env_idx}_{self.agent_idx}_{self.num_trajectories}"
-            traj_dict = dict(t_id=t_id, length=rollout_step, policy_id=policy_id, traj_buffer_idx=traj_buffer_idx)
+
+            # NOTE ant 2023-12-16: following is added by E3B to create unique
+            # identifier for the env
+            assert self.cfg.num_policies == 1 and self.agent_idx == 0
+            unique_env_id = self.env_idx
+            unique_env_id += self.cfg.num_envs_per_worker*self.worker_idx
+            unique_env_id += self.cfg.num_workers*self.cfg.num_envs_per_worker*self.split_idx
+            unique_env_id += self.cfg.num_workers*self.cfg.num_envs_per_worker*self.cfg.worker_num_splits*policy_id
+            unique_env_id += self.cfg.num_workers*self.cfg.num_envs_per_worker*self.cfg.worker_num_splits*self.cfg.num_policies*self.agent_idx
+
+            traj_dict = dict(t_id=t_id, length=rollout_step, policy_id=policy_id, 
+                             traj_buffer_idx=traj_buffer_idx, unique_env_id=unique_env_id, 
+                             rollout_step=rollout_step)
+            # E3B modifications end
+            # traj_dict = dict(t_id=t_id, length=rollout_step, policy_id=policy_id, traj_buffer_idx=traj_buffer_idx)
+
             trajectories.append(traj_dict)
             self.num_trajectories += 1
 

@@ -173,6 +173,11 @@ class Batcher(HeartbeatStoppableEventLoopObject):
                 # log.debug(f"{self.policy_id} received trajectory slice {trajectory_slice}")
                 self.slices_for_training[device].merge_slices(trajectory_slice)
 
+                # NOTE AC 2023-12-16: below added for E3B
+                self.traj_tensors['cpu']['env_id'][trajectory_dict['traj_buffer_idx']] = trajectory_dict['unique_env_id']
+                self.traj_tensors['cpu']['start_step'][trajectory_dict['traj_buffer_idx']] = trajectory_dict['rollout_step']
+                # E3B modification ends
+
             self._maybe_enqueue_new_training_batches()
 
     def _maybe_enqueue_new_training_batches(self):

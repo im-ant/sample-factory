@@ -124,6 +124,12 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_spaces, d
     tensors["valids"] = init_tensor([num_traj, rollout + 1], torch.bool, [], device, share)
     tensors["valids"].fill_(False)  # no valid experience by default
 
+    # NOTE Ant 2023-12-16: following are added by the E3B repo
+    tensors["env_id"] = init_tensor([num_traj], torch.int, [], device, share)
+    tensors["env_id"].fill_(-1)  # -1 is an invalid env index, this should be overwritten
+    tensors["start_step"] = init_tensor([num_traj], torch.long, [], device, share)
+    tensors["start_step"].fill_(-1)  # -1 is an invalid env index, this should be overwritten
+
     return tensors
 
 
