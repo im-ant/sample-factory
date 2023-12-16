@@ -34,10 +34,12 @@ class ModelCoreRNN(ModelCore):
         self.core_output_size = cfg.rnn_determinstic_size
         self.rnn_num_layers = cfg.rnn_num_layers
 
-    def forward(self, head_output, rnn_states):
+    def forward(self, head_output, rnn_states_dict):
         is_seq = not torch.is_tensor(head_output)
         if not is_seq:
             head_output = head_output.unsqueeze(0)
+
+        rnn_states = rnn_states_dict["deter"]  
 
         if self.rnn_num_layers > 1:
             rnn_states = rnn_states.view(rnn_states.size(0), self.cfg.rnn_num_layers, -1)
@@ -61,7 +63,8 @@ class ModelCoreRNN(ModelCore):
         else:
             new_rnn_states = new_rnn_states.squeeze(0)
 
-        return x, new_rnn_states
+        rnn_states_dict["deter"] = new_rnn_states
+        return x, rnn_states_dict
 
 
 class ModelCoreIdentity(ModelCore):

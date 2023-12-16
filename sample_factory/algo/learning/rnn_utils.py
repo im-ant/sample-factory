@@ -111,7 +111,7 @@ def _build_pack_info_from_dones(
     return rollout_starts_orig, is_new_episode, select_inds, batch_sizes, sorted_indices
 
 
-def build_rnn_inputs(x, dones_cpu, rnn_states, T: int):
+def build_rnn_inputs(x, dones_cpu, rnn_states_dict, T: int):
     """
     Create a PackedSequence input for an RNN such that each
     set of steps that are part of the same episode are all part of
@@ -119,12 +119,12 @@ def build_rnn_inputs(x, dones_cpu, rnn_states, T: int):
     Use the returned select_inds and build_core_out_from_seq to invert this.
     :param x: A (N*T, -1) tensor of the data to build the PackedSequence out of
     :param dones_cpu: A (N*T) tensor where dones[i] == 1.0 indicates an episode is done, a CPU-bound tensor
-    :param rnn_states: A (N*T, -1) tensor of the rnn_hidden_states
+    :param rnn_states_dict: A TensorDict containing tensors of shape (N*T, -1) of the rnn_hidden_states
     :param T: The length of the rollout
-    :return: tuple(x_seq, rnn_states, select_inds)
+    :return: tuple(x_seq, rnn_states_dict, select_inds)
         WHERE
         x_seq is the PackedSequence version of x to pass to the RNN
-        rnn_states are the corresponding rnn state, zeroed on the episode boundary
+        rnn_states_dict are the corresponding rnn states, zeroed on the episode boundary
         inverted_select_inds can be passed to build_core_out_from_seq so the RNN output can be retrieved
     """
     rollout_starts, is_new_episode, select_inds, batch_sizes, sorted_indices = _build_pack_info_from_dones(dones_cpu, T)
@@ -147,11 +147,12 @@ def build_rnn_inputs(x, dones_cpu, rnn_states, T: int):
     # (1 - is_new_episode.view(-1, 1)).index_select(0, rollout_starts) gives us a zero for every beginning of
     # the sequence that is actually also a start of a new episode, and by multiplying this RNN state by zero
     # we ensure no information transfer across episode boundaries.
-    rnn_states = rnn_states.index_select(0, rollout_starts)
     is_same_episode = (1 - is_new_episode.view(-1, 1)).index_select(0, rollout_starts)
-    rnn_states = rnn_states * is_same_episode
-
-    return x_seq, rnn_states, inverted_select_inds
+    for k in rnn_states_dict:
+        cur_rnn_states = rnn_states_dict[k].index_select(0, rollout_starts)
+        rnn_states_dict[k] = cur_rnn_states * is_same_episode
+    
+    return x_seq, rnn_states_dict, inverted_select_inds
 
 
 def build_core_out_from_seq(x_seq: PackedSequence, inverted_select_inds):
