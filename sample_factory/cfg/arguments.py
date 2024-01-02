@@ -257,7 +257,7 @@ def load_from_checkpoint(cfg: Config) -> AttrDict:
     with open(cfg_filename, "r") as json_file:
         json_params = json.load(json_file)
         log.warning("Loading existing experiment configuration from %s", cfg_filename)
-        loaded_cfg = AttrDict(json_params)
+        loaded_cfg = cfg_dict(json_params)
 
     # override the parameters in config file with values passed from command line
     for key, value in cfg.cli_args.items():
@@ -266,7 +266,7 @@ def load_from_checkpoint(cfg: Config) -> AttrDict:
             loaded_cfg[key] = value
 
     # incorporate extra CLI parameters that were not present in JSON file
-    for key, value in vars(cfg).items():
+    for key, value in cfg_dict(cfg).items():
         if key not in loaded_cfg:
             log.debug("Adding new argument %r=%r that is not in the saved config file!", key, value)
             loaded_cfg[key] = value
