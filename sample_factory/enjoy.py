@@ -14,11 +14,13 @@ from sample_factory.algo.utils.env_info import extract_env_info
 from sample_factory.algo.utils.make_env import make_env_func_batched
 from sample_factory.algo.utils.misc import ExperimentStatus
 from sample_factory.algo.utils.rl_utils import make_dones, prepare_and_normalize_obs
+from sample_factory.algo.utils.tensor_dict import TensorDict
 from sample_factory.algo.utils.tensor_utils import unsqueeze_tensor
+from sample_factory.algo.utils.torch_utils import to_torch_dtype
 from sample_factory.cfg.arguments import load_from_checkpoint
 from sample_factory.huggingface.huggingface_utils import generate_model_card, generate_replay_video, push_to_hf
 from sample_factory.model.actor_critic import create_actor_critic
-from sample_factory.model.model_utils import get_rnn_size
+from sample_factory.model.model_utils import get_rnn_size, get_rnn_info
 from sample_factory.utils.attr_dict import AttrDict
 from sample_factory.utils.typing import Config, StatusCode
 from sample_factory.utils.utils import debug_log_every_n, experiment_dir, log
@@ -82,6 +84,19 @@ def render_frame(cfg, env, video_frames, num_episodes, last_render_start) -> flo
     return render_start
 
 
+def get_zeros_rnn_state(leading_dimensions, cfg, device):
+    """Helper function to get zero vectors for rnn states"""
+    rnn_spaces = get_rnn_info(cfg)
+    rnn_states = TensorDict()
+    for space_name, rnn_space in rnn_spaces.items():
+        cur_dtype = to_torch_dtype(rnn_space.dtype) if not \
+            isinstance(rnn_space.dtype, torch.dtype) else rnn_space.dtype
+        rnn_states[space_name] = torch.zeros(
+            [*leading_dimensions, *rnn_space.shape], dtype=cur_dtype, device=device)
+    
+    return rnn_states
+
+
 def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
     verbose = False
 
@@ -136,7 +151,9 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
     reward_list = []
 
     obs, infos = env.reset()
-    rnn_states = torch.zeros([env.num_agents, get_rnn_size(cfg)], dtype=torch.float32, device=device)
+    # rnn_states = torch.zeros([env.num_agents, get_rnn_size(cfg)], dtype=torch.float32, device=device)
+    rnn_states = get_zeros_rnn_state([env.num_agents], cfg, device)
+        
     episode_reward = None
     finished_episode = [False for _ in range(env.num_agents)]
 
@@ -152,7 +169,7 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
             policy_outputs = actor_critic(normalized_obs, rnn_states)
 
             # sample actions from the distribution by default
-            actions = policy_outputs["actions"]
+            actions = policy_outputs["concat_outputs"]["actions"]
 
             if cfg.eval_deterministic:
                 action_distribution = actor_critic.action_distribution()
@@ -201,7 +218,8 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
                                 episode_reward[agent_i],
                                 true_objectives[agent_i][-1],
                             )
-                        rnn_states[agent_i] = torch.zeros([get_rnn_size(cfg)], dtype=torch.float32, device=device)
+                        #rnn_states[agent_i] = torch.zeros([get_rnn_size(cfg)], dtype=torch.float32, device=device)
+                        rnn_states[agent_i] = get_zeros_rnn_state([], cfg, device)
                         episode_reward[agent_i] = 0
 
                         if cfg.use_record_episode_statistics:

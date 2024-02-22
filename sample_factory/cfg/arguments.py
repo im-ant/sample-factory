@@ -238,6 +238,50 @@ def default_cfg(algo="APPO", env="env", experiment="test"):
     return args
 
 
+def override_config(config_dict, mod_dict, prefix=""):
+    """
+    In-place override of config_dict with mod_dict for same existing keys;
+    do NOT set prefix, only used to print out
+    """
+    dict_like = lambda x: isinstance(x, dict) or isinstance(x, AttrDict) \
+        or isinstance(x, omegaconf.dictconfig.DictConfig)
+    for key in mod_dict:
+        if key not in config_dict:
+            continue  # Do not add new keys to full_dict
+
+        value = mod_dict[key]
+        if dict_like(value) and dict_like(config_dict[key]):
+            # If both are dictionaries, recurse
+            cur_prefix = key if prefix == "" else f"{prefix}.{key}"
+            override_config(config_dict[key], value, prefix=cur_prefix)
+        elif config_dict[key] != value:
+            # If the value is different, update it
+            str_full_key = key if prefix == "" else f"{prefix}.{key}"
+            log.debug("Overriding arg %r with value %r passed from command line", 
+                      str_full_key, value)
+            config_dict[key] = mod_dict[key]
+
+
+def add_new_config(config_dict, mod_dict, prefix=""):
+    """
+    In-place add new keys from mod_dict to config_dict;
+    do NOT set prefix, only used to print out
+    """
+    dict_like = lambda x: isinstance(x, dict) or isinstance(x, AttrDict) \
+        or isinstance(x, omegaconf.dictconfig.DictConfig)
+    for key in mod_dict:
+        value = mod_dict[key]
+        if key not in config_dict:
+            str_full_key = key if prefix == "" else f"{prefix}.{key}"
+            log.debug("Adding new argument %r=%r that is not in the saved config file!", 
+                        str_full_key, value)
+            config_dict[key] = value
+            
+        elif dict_like(config_dict[key]) and dict_like(value):
+            cur_prefix = key if prefix == "" else f"{prefix}.{key}"
+            add_new_config(config_dict[key], value, prefix=cur_prefix)
+
+
 def load_from_checkpoint(cfg: Config) -> AttrDict:
     cfg_filename = cfg_file(cfg)
     cfg_filename_old = cfg_file_old(cfg)
@@ -260,17 +304,11 @@ def load_from_checkpoint(cfg: Config) -> AttrDict:
         loaded_cfg = cfg_dict(json_params)
 
     # override the parameters in config file with values passed from command line
-    for key, value in cfg.cli_args.items():
-        if key in loaded_cfg and loaded_cfg[key] != value:
-            log.debug("Overriding arg %r with value %r passed from command line", key, value)
-            loaded_cfg[key] = value
-
+    override_config(loaded_cfg, cfg.cli_args)
+    
     # incorporate extra CLI parameters that were not present in JSON file
-    for key, value in cfg_dict(cfg).items():
-        if key not in loaded_cfg:
-            log.debug("Adding new argument %r=%r that is not in the saved config file!", key, value)
-            loaded_cfg[key] = value
-
+    add_new_config(loaded_cfg, cfg.cli_args)
+    
     return loaded_cfg
 
 
