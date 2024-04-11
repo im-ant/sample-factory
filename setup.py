@@ -28,12 +28,12 @@ _docs_deps = [
 setup(
     # Information
     name="sample-factory",
-    description="High throughput asynchronous reinforcement learning framework",
+    description="High throughput asynchronous reinforcement learning framework, Local Saving Copy",
     long_description=long_description,
     long_description_content_type="text/markdown",
     version="2.1.1",
-    url="https://github.com/alex-petrenko/sample-factory",
-    author="Aleksei Petrenko",
+    url="https://github.com/im-ant/saving-sample-factory",
+    author="Aleksei Petrenko, Anthony Chen",
     license="MIT",
     keywords="asynchronous reinforcement learning policy gradient ppo appo impala ai",
     project_urls={

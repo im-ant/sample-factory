@@ -137,6 +137,8 @@ class ActorCriticSharedWeights(ActorCritic):
     ):
         super().__init__(obs_space, action_space, cfg)
 
+        self.goal_size = cfg.goal_size if "goal_size" in cfg else 1  # dummy
+
         # in case of shared weights we're using only a single encoder and a single core
         self.encoder = model_factory.make_model_encoder_func(cfg, obs_space)
         self.encoders = [self.encoder]  # a single shared encoder
@@ -172,13 +174,23 @@ class ActorCriticSharedWeights(ActorCritic):
         # `action_logits` is not the best name here, better would be "action distribution parameters"
         result["action_logits"] = action_distribution_params
 
+        # Dummy goal, all zeros (required by goal conditioned sample-factory)
+        dummy_goals = torch.zeros((core_output.shape[0], self.goal_size), 
+                                  device=values.device).long()
+        result["goals"] = dummy_goals
+
         self._maybe_sample_actions(sample_actions, result)
         return result
 
-    def forward(self, normalized_obs_dict, rnn_states, values_only=False) -> TensorDict:
+    def forward(self, normalized_obs_dict, rnn_states, actions=None, dones=None, 
+                values_only=False) -> TensorDict:
         x = self.forward_head(normalized_obs_dict)
         x, new_rnn_states = self.forward_core(x, rnn_states)
-        result = self.forward_tail(x, values_only, sample_actions=True)
+
+        concat_results = self.forward_tail(x, values_only, sample_actions=True)
+
+        result = TensorDict()
+        result["concat_outputs"] = concat_results
         result["new_rnn_states"] = new_rnn_states
         return result
 
@@ -192,6 +204,8 @@ class ActorCriticSeparateWeights(ActorCritic):
         cfg: Config,
     ):
         super().__init__(obs_space, action_space, cfg)
+
+        self.goal_size = cfg.goal_size if "goal_size" in cfg else 1  # dummy
 
         self.actor_encoder = model_factory.make_model_encoder_func(cfg, obs_space)
         self.actor_core = model_factory.make_model_core_func(cfg, self.actor_encoder.get_out_size())
@@ -266,14 +280,25 @@ class ActorCriticSeparateWeights(ActorCritic):
 
         result["action_logits"] = action_distribution_params
 
+        # Dummy goal, all zeros (required by goal conditioned sample-factory)
+        dummy_goals = torch.zeros((core_output.shape[0], self.goal_size), 
+                                  device=values.device).long()
+        result["goals"] = dummy_goals
+
         self._maybe_sample_actions(sample_actions, result)
         return result
 
-    def forward(self, normalized_obs_dict, rnn_states, values_only=False) -> TensorDict:
+    def forward(self, normalized_obs_dict, rnn_states, actions=None, dones=None, 
+                values_only=False) -> TensorDict:
         x = self.forward_head(normalized_obs_dict)
         x, new_rnn_states = self.forward_core(x, rnn_states)
-        result = self.forward_tail(x, values_only, sample_actions=True)
+
+        concat_results = self.forward_tail(x, values_only, sample_actions=True)
+
+        result = TensorDict()
+        result["concat_outputs"] = concat_results
         result["new_rnn_states"] = new_rnn_states
+
         return result
 
 
